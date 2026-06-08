@@ -1,0 +1,242 @@
+-- =============================================================================
+-- THE ULTIMATE FULL COMPREHENSIVE GRANNY MULTIPLAYER RADAR (STANDALONE ARCHITECTURE)
+-- =============================================================================
+
+local Players = game:GetService("Players")
+local ESP_TRACKING_CACHE = {}
+
+-- Comprehensive Item Registry Mapping
+local ITEM_CONFIG = {
+    -- Core Keys & Access Cards (Red / Gold)
+    ["master key"] = Color3.fromRGB(255, 0, 0),    
+    ["padlock key"] = Color3.fromRGB(255, 215, 0),  
+    ["playhouse key"] = Color3.fromRGB(255, 215, 0),
+    ["car key"] = Color3.fromRGB(255, 215, 0),
+    ["weapon key"] = Color3.fromRGB(255, 215, 0),
+    ["special key"] = Color3.fromRGB(255, 215, 0),
+    ["safe key"] = Color3.fromRGB(255, 215, 0),
+    ["spider key"] = Color3.fromRGB(255, 215, 0),   
+    ["security key"] = Color3.fromRGB(255, 215, 0),
+    ["shed key"] = Color3.fromRGB(255, 215, 0),     
+    ["helicopter key"] = Color3.fromRGB(255, 215, 0),
+    ["boat key"] = Color3.fromRGB(255, 215, 0),
+    ["train key"] = Color3.fromRGB(255, 215, 0),
+    ["ticket"] = Color3.fromRGB(255, 215, 0),
+
+    -- Mechanical Tools & Breakables (Orange)
+    ["hammer"] = Color3.fromRGB(255, 127, 80),
+    ["cutting pliers"] = Color3.fromRGB(255, 127, 80),
+    ["wire cutter"] = Color3.fromRGB(255, 127, 80),
+    ["chain cutter"] = Color3.fromRGB(255, 127, 80), 
+    ["cogwheel"] = Color3.fromRGB(255, 127, 80),
+    ["orange cogwheel"] = Color3.fromRGB(255, 127, 80),
+    ["red cogwheel"] = Color3.fromRGB(255, 127, 80),
+    ["wrench"] = Color3.fromRGB(255, 127, 80),
+    ["crowbar"] = Color3.fromRGB(255, 127, 80),
+    ["screwdriver"] = Color3.fromRGB(255, 127, 80), 
+    ["winch handle"] = Color3.fromRGB(255, 127, 80),
+    ["wheel crank"] = Color3.fromRGB(255, 127, 80), 
+    ["bridge crank"] = Color3.fromRGB(255, 127, 80),
+    ["hand wheel"] = Color3.fromRGB(255, 127, 80),
+    ["remote control"] = Color3.fromRGB(255, 127, 80),
+    ["lockpick"] = Color3.fromRGB(255, 127, 80),       
+    ["code"] = Color3.fromRGB(255, 255, 255),
+    ["padlock code"] = Color3.fromRGB(255, 255, 255),
+    
+    -- Vehicle Fuel, Assemblies & Structural Handles (Bright Pink / Magenta / Black Custom)
+    ["engine part"] = Color3.fromRGB(0, 0, 0),          -- Transformed to Pure Black
+    ["car battery"] = Color3.fromRGB(255, 20, 147),
+    ["battery"] = Color3.fromRGB(255, 20, 147),
+    ["gas canister"] = Color3.fromRGB(255, 20, 147),
+    ["gasoline can"] = Color3.fromRGB(255, 20, 147),
+    ["gasoline"] = Color3.fromRGB(255, 20, 147),
+    ["spark plug"] = Color3.fromRGB(255, 20, 147),
+    ["helicopter manual"] = Color3.fromRGB(255, 20, 147),
+    ["generator cable"] = Color3.fromRGB(255, 20, 147), 
+    ["door handle"] = Color3.fromRGB(255, 20, 147),     
+    ["door lock"] = Color3.fromRGB(255, 20, 147),       
+    ["boat steering wheel"] = Color3.fromRGB(255, 20, 147), 
+    ["duct tape"] = Color3.fromRGB(255, 20, 147),       
+    ["picture piece"] = Color3.fromRGB(255, 20, 147),   
+    ["accelerator"] = Color3.fromRGB(255, 20, 147),     
+    ["electric switch"] = Color3.fromRGB(255, 20, 147),  
+    ["door activator"] = Color3.fromRGB(255, 20, 147),   
+
+    -- Environmental Puzzles & Bait Items (Mint Green)
+    ["fuse"] = Color3.fromRGB(0, 250, 154),
+    ["glass fuse"] = Color3.fromRGB(0, 250, 154),
+    ["plank"] = Color3.fromRGB(0, 250, 154),
+    ["teddy bear"] = Color3.fromRGB(0, 250, 154),
+    ["teddy"] = Color3.fromRGB(0, 250, 154),
+    ["coconut"] = Color3.fromRGB(0, 250, 154),
+    ["coin"] = Color3.fromRGB(0, 250, 154),            
+    ["melon"] = Color3.fromRGB(0, 250, 154),       
+    ["meat"] = Color3.fromRGB(0, 250, 154),        
+    ["birdseed"] = Color3.fromRGB(0, 250, 154),    
+    ["book"] = Color3.fromRGB(0, 250, 154),        
+    ["firewood"] = Color3.fromRGB(0, 250, 154),        
+    ["matches"] = Color3.fromRGB(0, 250, 154),         
+
+    -- Defensive Weapons, Assemblies & Tactical Items (Cyan)
+    ["shotgun"] = Color3.fromRGB(0, 191, 255),
+    ["shotgun part"] = Color3.fromRGB(0, 191, 255),     
+    ["shotgun barrel"] = Color3.fromRGB(0, 191, 255),   
+    ["shotgun stock"] = Color3.fromRGB(0, 191, 255),    
+    ["shotgun trigger"] = Color3.fromRGB(0, 191, 255),  
+    ["crossbow"] = Color3.fromRGB(0, 191, 255),
+    ["slingshot"] = Color3.fromRGB(0, 191, 255),       
+    ["stun gun"] = Color3.fromRGB(0, 191, 255),        
+    ["pepper spray"] = Color3.fromRGB(0, 191, 255), 
+    ["freeze trap"] = Color3.fromRGB(0, 191, 255),  
+    ["hand grenade"] = Color3.fromRGB(0, 191, 255),     
+    
+    -- Escape Vehicles Targets (Purple)
+    ["car"] = Color3.fromRGB(138, 43, 226),         
+    ["helicopter"] = Color3.fromRGB(138, 43, 226),
+    ["boat"] = Color3.fromRGB(138, 43, 226),
+    ["train"] = Color3.fromRGB(138, 43, 226)           
+}
+
+-- Ownership Filter Validation Loop
+local function isHeldByPlayer(object)
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player.Character and object:IsDescendantOf(player.Character) then
+            return true
+        end
+        local backpack = player:FindFirstChildWhichIsA("Backpack")
+        if backpack and object:IsDescendantOf(backpack) then
+            return true
+        end
+    end
+    return false
+end
+
+-- Core Render Mechanism
+local function createUniversalESP(object, displayName, espColor, isAI)
+    if ESP_TRACKING_CACHE[object] or object:FindFirstChild("UniversalItemESP") then return end
+    ESP_TRACKING_CACHE[object] = true
+
+    local targetPart
+    if isAI then
+        targetPart = object:WaitForChild("HumanoidRootPart", 3) or object:FindFirstChildWhichIsA("BasePart")
+    else
+        targetPart = object:IsA("BasePart") and object or object:FindFirstChildWhichIsA("BasePart")
+    end
+    
+    if not targetPart then 
+        ESP_TRACKING_CACHE[object] = nil
+        return 
+    end
+
+    local espFolder = Instance.new("Folder")
+    espFolder.Name = "UniversalItemESP"
+    espFolder.Parent = object
+
+    local highlight = Instance.new("Highlight")
+    highlight.Adornee = object
+    highlight.FillColor = espColor
+    highlight.FillTransparency = isAI and 0.6 or 0.5
+    highlight.OutlineColor = (espColor == Color3.fromRGB(0,0,0)) and Color3.fromRGB(255,255,255) or espColor -- High contrast outline for black engine part
+    highlight.OutlineTransparency = 0
+    highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+    highlight.Parent = espFolder
+
+    local billboard = Instance.new("BillboardGui")
+    billboard.Name = "ItemLabel"
+    billboard.Size = UDim2.new(0, 150, 0, 40)
+    billboard.AlwaysOnTop = true
+    billboard.ExtentsOffset = Vector3.new(0, isAI and 3 or 1.5, 0)
+    billboard.MaxDistance = 10000
+    billboard.Adornee = targetPart
+    billboard.Parent = espFolder
+
+    local label = Instance.new("TextLabel")
+    label.Size = UDim2.new(1, 0, 1, 0)
+    label.BackgroundTransparency = 1
+    label.TextColor3 = (espColor == Color3.fromRGB(0,0,0)) and Color3.fromRGB(255,255,255) or espColor -- Clear white text for black layout compatibility
+    label.TextStrokeTransparency = 0
+    label.TextStrokeColor3 = Color3.fromRGB(0,0,0)
+    label.TextScaled = true
+    label.Font = Enum.Font.SourceSansBold
+    label.Parent = billboard
+
+    task.spawn(function()
+        local camera = workspace.CurrentCamera
+        while object and object.Parent and espFolder.Parent do
+            if not isAI and isHeldByPlayer(object) then
+                espFolder:Destroy()
+                break
+            end
+
+            if camera and targetPart and targetPart.Parent then
+                local currentPosition = targetPart.Position
+                if currentPosition.Magnitude < 1 and object:IsA("Model") then
+                    currentPosition = object:GetPivot().Position
+                end
+
+                local distance = (camera.CFrame.Position - currentPosition).Magnitude
+                
+                if isAI then
+                    label.Text = string.format("WARNING: %s\n[%d Studs]", string.upper(displayName), math.floor(distance))
+                else
+                    label.Text = string.format("%s\n[%d Studs]", string.upper(displayName), math.floor(distance))
+                end
+            else
+                label.Text = ""
+            end
+            task.wait(isAI and 0.05 or 0.3)
+        end
+        ESP_TRACKING_CACHE[object] = nil
+    end)
+end
+
+-- Sorting Engine
+local function checkAndApply(desc)
+    local lowerName = string.lower(desc.Name)
+    if string.find(lowerName, "prop") then return end 
+    
+    -- 1. Main Enemy Threat AI Profiles (Granny, Grandpa, Slendrina)
+    if lowerName == "granny" or lowerName == "grandpa" or lowerName == "slendrina" then
+        if desc:IsA("Model") and (string.find(desc:GetFullName(), "Locks") or desc:FindFirstChild("Humanoid") or desc:FindFirstChild("HumanoidRootPart")) then
+            local enemyColor = Color3.fromRGB(0, 255, 0) 
+            if lowerName == "grandpa" then enemyColor = Color3.fromRGB(148, 0, 211) end
+            if lowerName == "slendrina" then enemyColor = Color3.fromRGB(255, 105, 180) end
+            
+            createUniversalESP(desc, desc.Name, enemyColor, true)
+            return
+        end
+    end
+
+    -- 2. Robust Wildcard Size Check For Large Boss Spider
+    if string.find(lowerName, "spider") and desc:IsA("Model") then
+        if not string.find(lowerName, "key") and not string.find(lowerName, "room") and desc.Name ~= "Spiders" then
+            if desc:FindFirstChildWhichIsA("BasePart") or desc:FindFirstChild("Humanoid") then
+                local _, size = desc:GetPivot()
+                -- Enforces volume limitation filter to drop tiny floor crawler clones completely
+                if size and (size.X * size.Y * size.Z) > 15 then
+                    createUniversalESP(desc, "BIG SPIDER", Color3.fromRGB(255, 69, 0), true)
+                    return
+                end
+            end
+        end
+    end
+    
+    -- 3. Strict Structural Matrix Match For Loot & Vehicles
+    local itemColor = ITEM_CONFIG[lowerName]
+    if itemColor then
+        if desc.Parent and string.lower(desc.Parent.Name) == lowerName then return end
+        createUniversalESP(desc, desc.Name, itemColor, false)
+    end
+end
+
+-- Execution Hooks
+for _, desc in ipairs(workspace:GetDescendants()) do
+    checkAndApply(desc)
+end
+
+workspace.DescendantAdded:Connect(function(desc)
+    task.wait(0.4)
+    checkAndApply(desc)
+end)
+
+print("Master Radar Active: Clean background configuration initialized.")
