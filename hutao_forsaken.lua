@@ -237,6 +237,7 @@ secUpdateLogs:Paragraph({
 • Added Credits tab — Storm (GUI), mitsuki (Scripter), special thanks to glov/v1pr
 • Added Config Share section — copy your config as a string and load anyone's config instantly
 • Replaced ESP with Rayfield-style system — Dark Red (Killers), Gold (Survivors with health color), Cyan/Orange (Items), Purple (Buildings), Generators show [0/4]
+• Added Hatch and Gate ESP support
 ]],
     Thumbnail = "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcTIlF85el7kKB1e-xpvnwBJmOq9dripkUhY65rFpyyLrQ&s=10",
     ThumbnailSize = 500
@@ -1166,6 +1167,8 @@ local ESP_CONFIG = {
     Generators  = false,
     Items       = false,
     Buildings   = false,
+    Hatch       = false,
+    Gates       = false,
     
     -- Colors (Rayfield style)
     KillerColor    = Color3.fromRGB(100, 0, 0),      -- Dark Red
@@ -1173,6 +1176,8 @@ local ESP_CONFIG = {
     GeneratorColor = Color3.fromRGB(255, 200, 50),   -- Yellow
     ItemColor      = Color3.fromRGB(0, 200, 255),    -- Cyan
     BuildingColor  = Color3.fromRGB(128, 0, 255),    -- Purple
+    HatchColor     = Color3.fromRGB(0, 255, 200),    -- Teal/Cyan
+    GateColor      = Color3.fromRGB(255, 100, 255),  -- Pink/Magenta
     
     MaxDistance    = 2000,
 }
@@ -1409,7 +1414,7 @@ local function AddESP(object, tag, defaultColor, isCharacter)
 end
 
 -- ============================================================================
--- SCAN FUNCTIONS - FIXED: Only scans Models, ignores body parts
+-- SCAN FUNCTIONS - UPDATED WITH CLEAN SCAN
 -- ============================================================================
 
 local function ScanAll()
@@ -1435,8 +1440,28 @@ local function ScanAll()
                 end
             end
         end
+        
+        -- 2. SCAN FOR HATCH
+        if win.Flags.espHatch then
+            local hatch = currentMap:FindFirstChild("Hatch")
+            if hatch and hatch:IsA("Model") and not EngineState.Pool[hatch] then
+                AddESP(hatch, "Hatch", ESP_CONFIG.HatchColor, false)
+            end
+        end
+        
+        -- 3. SCAN FOR GATES
+        if win.Flags.espGates then
+            local gates = currentMap:FindFirstChild("Gates")
+            if gates then
+                for _, gate in ipairs(gates:GetChildren()) do
+                    if gate:IsA("Model") and not EngineState.Pool[gate] then
+                        AddESP(gate, "Gate", ESP_CONFIG.GateColor, false)
+                    end
+                end
+            end
+        end
 
-        -- 2. CLEAN SCAN FOR SURVIVORS / RIGS (Filtering out "BodyParts")
+        -- 4. CLEAN SCAN FOR SURVIVORS / RIGS (Filtering out "BodyParts")
         local chars = currentMap:FindFirstChild("Characters")
         if chars then
             for _, char in ipairs(chars:GetChildren()) do
@@ -1445,7 +1470,7 @@ local function ScanAll()
                     -- We skip tagging it to avoid visual clutter on the screen.
                     if char.Name == "BodyParts" or char:FindFirstChild("BodyParts") then
                         -- Check if this is a survivor/killer group container instead of raw parts
-                        continue
+                        goto continue
                     end
 
                     -- Determine if it's a Killer or Survivor based on game indicators
@@ -1465,22 +1490,7 @@ local function ScanAll()
                         end
                     end
                 end
-            end
-        end
-    end
-end
-
-    if ESP_CONFIG.Buildings then
-        local ig = svc.WS:FindFirstChild("Map") and svc.WS.Map:FindFirstChild("Ingame")
-        if ig then
-            local buildingNames = {"BuildermanSentry", "SubspaceTripmine", "BuildermanDispenser"}
-            for _, obj in ipairs(ig:GetChildren()) do
-                for _, name in ipairs(buildingNames) do
-                    if obj.Name == name then
-                        AddESP(obj, "Building", ESP_CONFIG.BuildingColor, false)
-                        break
-                    end
-                end
+                ::continue::
             end
         end
     end
@@ -1534,6 +1544,14 @@ svc.WS.DescendantAdded:Connect(function(obj)
             end
         end
     end
+    
+    if ESP_CONFIG.Hatch and obj.Name == "Hatch" then
+        AddESP(obj, "Hatch", ESP_CONFIG.HatchColor, false)
+    end
+    
+    if ESP_CONFIG.Gates and obj.Name == "Gate" then
+        AddESP(obj, "Gate", ESP_CONFIG.GateColor, false)
+    end
 end)
 
 -- Also watch for new parts inside models for items
@@ -1569,13 +1587,13 @@ end)
 -- UI TOGGLES (WindUI)
 -- ============================================================================
 
-secESP:Toggle({ Title="👹 Killers (Dark Red)", Type="Checkbox", Flag="espKillers", Default=ESP_CONFIG.Killers,
+secESP:Toggle({ Title="👹 Killers (Dark Red)", Type="Checkbox", Flag="espKiller", Default=ESP_CONFIG.Killers,
     Callback=function(on) ESP_CONFIG.Killers=on; if on then pcall(ScanAll) end end })
 
-secESP:Toggle({ Title="👥 Survivors (Gold)", Type="Checkbox", Flag="espSurvivors", Default=ESP_CONFIG.Survivors,
+secESP:Toggle({ Title="👥 Survivors (Gold)", Type="Checkbox", Flag="espSurv", Default=ESP_CONFIG.Survivors,
     Callback=function(on) ESP_CONFIG.Survivors=on; if on then pcall(ScanAll) end end })
 
-secESP:Toggle({ Title="⚙️ Generators (0/4)", Type="Checkbox", Flag="espGenerators", Default=ESP_CONFIG.Generators,
+secESP:Toggle({ Title="⚙️ Generators (0/4)", Type="Checkbox", Flag="espGens", Default=ESP_CONFIG.Generators,
     Callback=function(on) ESP_CONFIG.Generators=on; if on then pcall(ScanAll) end end })
 
 secESP:Toggle({ Title="📦 Items (Cyan/Orange)", Type="Checkbox", Flag="espItems", Default=ESP_CONFIG.Items,
@@ -1583,6 +1601,12 @@ secESP:Toggle({ Title="📦 Items (Cyan/Orange)", Type="Checkbox", Flag="espItem
 
 secESP:Toggle({ Title="🏗️ Buildings (Purple)", Type="Checkbox", Flag="espBuildings", Default=ESP_CONFIG.Buildings,
     Callback=function(on) ESP_CONFIG.Buildings=on; if on then pcall(ScanAll) end end })
+
+secESP:Toggle({ Title="🕳️ Hatch (Teal)", Type="Checkbox", Flag="espHatch", Default=ESP_CONFIG.Hatch,
+    Callback=function(on) ESP_CONFIG.Hatch=on; if on then pcall(ScanAll) end end })
+
+secESP:Toggle({ Title="🚪 Gates (Pink)", Type="Checkbox", Flag="espGates", Default=ESP_CONFIG.Gates,
+    Callback=function(on) ESP_CONFIG.Gates=on; if on then pcall(ScanAll) end end })
 
 secESP:Button({ Title="🔄 Refresh ESP", Callback=function() pcall(ScanAll) end })
 
@@ -4195,7 +4219,6 @@ sec_019:Slider({ Title = "Aim Duration (s)", Flag = "combatAimDur", Step = 0.05,
     Callback = function(v) combatS.aimPunchDuration = v end })
 end) -- END OF GUEST 1337 PCALL
 
-
 -- =========================================================================
 -- TAB: TWO-TIME (Dagger / Flank)
 -- =========================================================================
@@ -4592,12 +4615,14 @@ task.spawn(function()
             flow.on = win.Flags.flowOn or false
 
             -- ESP
-            ESP_CONFIG.Killers = win.Flags.espKillers or false
-            ESP_CONFIG.Survivors = win.Flags.espSurvivors or false
-            ESP_CONFIG.Generators = win.Flags.espGenerators or false
+            ESP_CONFIG.Killers = win.Flags.espKiller or false
+            ESP_CONFIG.Survivors = win.Flags.espSurv or false
+            ESP_CONFIG.Generators = win.Flags.espGens or false
             ESP_CONFIG.Items = win.Flags.espItems or false
             ESP_CONFIG.Buildings = win.Flags.espBuildings or false
-            if ESP_CONFIG.Killers or ESP_CONFIG.Survivors or ESP_CONFIG.Generators or ESP_CONFIG.Items or ESP_CONFIG.Buildings then
+            ESP_CONFIG.Hatch = win.Flags.espHatch or false
+            ESP_CONFIG.Gates = win.Flags.espGates or false
+            if ESP_CONFIG.Killers or ESP_CONFIG.Survivors or ESP_CONFIG.Generators or ESP_CONFIG.Items or ESP_CONFIG.Buildings or ESP_CONFIG.Hatch or ESP_CONFIG.Gates then
                 pcall(ScanAll)
             end
 
@@ -4645,4 +4670,4 @@ end) -- Close global pcall
 if not _ok then
     warn("[HUTAO ERROR]", tostring(_err))
     print("[HUTAO ERROR]", tostring(_err))
-end 
+end
