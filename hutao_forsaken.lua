@@ -63,8 +63,6 @@ local fs = {
     asset     = getcustomasset or function(p) return p end,
 }
 
-
-
 ------------------------------------------------------------------------
 -- WindUI
 ------------------------------------------------------------------------
@@ -164,8 +162,6 @@ local win = ui:CreateWindow({
     },
 })
 
-
-
 local ConfigManager = win.ConfigManager
 local sakiConfig = ConfigManager:CreateConfig("hutao-forsaken")
 
@@ -240,6 +236,7 @@ secUpdateLogs:Paragraph({
 • Turning it off removes it cleanly
 • Added Credits tab — Storm (GUI), mitsuki (Scripter), special thanks to glov/v1pr
 • Added Config Share section — copy your config as a string and load anyone's config instantly
+• Replaced ESP with Rayfield-style system — Dark Red (Killers), Gold (Survivors with health color), Cyan/Orange (Items), Purple (Buildings), Generators show [0/4]
 ]],
     Thumbnail = "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcTIlF85el7kKB1e-xpvnwBJmOq9dripkUhY65rFpyyLrQ&s=10",
     ThumbnailSize = 500
@@ -368,8 +365,6 @@ lp.CharacterAdded:Connect(function()
         if stam.on then stamApply(); if not stam.thread then stamStart() end end
     end)
 end)
-
-
 
 ------------------------------------------------------------------------
 -- STATUS EFFECTS
@@ -873,20 +868,21 @@ local function flowSolve(puzzle)
     end
     for _, ci in ipairs(indices) do
         local solution = puzzle.Solution[ci]
-        if not solution then continue end
-        -- order the path starting from one of the target endpoints
-        local ordered = flowOrder(solution, puzzle.targetPairs[ci])
-        if not ordered or #ordered == 0 then continue end
-        -- reset this color's path then write nodes one by one
-        puzzle.paths[ci] = {}
-        for _, node in ipairs(ordered) do
-            table.insert(puzzle.paths[ci], { row = node.row, col = node.col })
-            -- updateGui rebuilds connections internally via getGrid() — no manual gridConnections needed
-            puzzle:updateGui()
-            task.wait(flow.nodeDelay)
+        if solution then
+            -- order the path starting from one of the target endpoints
+            local ordered = flowOrder(solution, puzzle.targetPairs[ci])
+            if ordered and #ordered > 0 then
+                -- reset this color's path then write nodes one by one
+                puzzle.paths[ci] = {}
+                for _, node in ipairs(ordered) do
+                    table.insert(puzzle.paths[ci], { row = node.row, col = node.col })
+                    puzzle:updateGui()
+                    task.wait(flow.nodeDelay)
+                end
+                task.wait(flow.lineDelay)
+                puzzle:checkForWin()
+            end
         end
-        task.wait(flow.lineDelay)
-        puzzle:checkForWin()
     end
 end
 
@@ -1154,169 +1150,444 @@ secKillerAbilities:Toggle({ Title="Noli — Void Rush Control", Type="Checkbox",
 
 ------------------------------------------------------------------------
 ------------------------------------------------------------------------
--- TAB: VISUAL (ESP)
+-- TAB: VISUAL (ESP) - RAYFIELD STYLE
 ------------------------------------------------------------------------
 ------------------------------------------------------------------------
 local tabVisual = win:Tab({ Title = "Visual", Icon = "eye", IconColor = Color3.fromHex("#7DD3FC"), ShowTabTitle = false })
-local secESP    = tabVisual:Section({ Title = "ESP", Opened = true })
+local secESP    = tabVisual:Section({ Title = "ESP (Rayfield Style)", Opened = true })
 
-local esp = {
-    killers    = false,
-    survivors  = false,
-    generators = false,
-    items      = false,
-    buildings  = false,
-    killerFolder=nil, survivorFolder=nil, mapFolder=nil,
-    playerConns={}, mapConns={}, healthConns={}, progConns={}, guardConns={}, ready=false,
+-- ============================================================================
+-- ESP CONFIG - RAYFIELD STYLE
+-- ============================================================================
+
+local ESP_CONFIG = {
+    Killers     = false,
+    Survivors   = false,
+    Generators  = false,
+    Items       = false,
+    Buildings   = false,
+    
+    -- Colors (Rayfield style)
+    KillerColor    = Color3.fromRGB(100, 0, 0),      -- Dark Red
+    SurvivorColor  = Color3.fromRGB(255, 215, 0),    -- Gold
+    GeneratorColor = Color3.fromRGB(255, 200, 50),   -- Yellow
+    ItemColor      = Color3.fromRGB(0, 200, 255),    -- Cyan
+    BuildingColor  = Color3.fromRGB(128, 0, 255),    -- Purple
+    
+    MaxDistance    = 2000,
 }
 
-local function espItemColor(name)
-    local n = name:lower()
-    if n:find("medkit")    then return Color3.fromRGB(0, 255, 255) end  -- Cyan
-    if n:find("bloxycola") then return Color3.fromRGB(0, 255, 255) end  -- Cyan
-    return Color3.fromRGB(0, 255, 255)
+-- State Storage
+local EngineState = {
+    Pool = {},
+    Connections = {},
+}
+
+-- ============================================================================
+-- COLOR HELPERS
+-- ============================================================================
+
+local function GetHealthColor(pct)
+    if pct >= 70 then return Color3.fromRGB(255, 215, 0) end    -- Gold
+    if pct >= 40 then return Color3.fromRGB(255, 165, 0) end    -- Orange
+    if pct >= 15 then return Color3.fromRGB(255, 100, 0) end    -- Dark Orange
+    return Color3.fromRGB(255, 0, 0)                            -- Red
 end
 
-local function espItemHeld(obj)
-    for _, plr in ipairs(svc.Players:GetPlayers()) do
-        local ch = plr.Character
-        if ch and obj:IsDescendantOf(ch) then return true end
-        local bp = plr:FindFirstChildOfClass("Backpack")
-        if bp and obj:IsDescendantOf(bp) then return true end
+local function GetItemColor(name)
+    local lowered = name:lower()
+    if lowered:find("medkit") then
+        return Color3.fromRGB(0, 200, 255)    -- Cyan
+    elseif lowered:find("bloxycola") then
+        return Color3.fromRGB(255, 150, 0)    -- Orange
     end
-    return false
+    return Color3.fromRGB(0, 200, 255)
 end
 
-local espAttach
-local espDetach
+-- ============================================================================
+-- TEAM FOLDER RESOLVERS
+-- ============================================================================
 
-espAttach = function(obj, tag, color, isChar)
-    if not obj or not obj.Parent then return end
-    if obj:FindFirstChild(tag) and obj:FindFirstChild(tag.."_bb") then return end
-    if esp.guardConns[obj]  then pcall(function() esp.guardConns[obj]:Disconnect()  end); esp.guardConns[obj]  = nil end
-    if esp.healthConns[obj] then pcall(function() esp.healthConns[obj]:Disconnect() end); esp.healthConns[obj] = nil end
-    if esp.progConns[obj]   then pcall(function() esp.progConns[obj]:Disconnect()   end); esp.progConns[obj]   = nil end
-    pcall(function()
-        local h = obj:FindFirstChild(tag);        if h then h:Destroy() end
-        local b = obj:FindFirstChild(tag.."_bb"); if b then b:Destroy() end
-    end)
-    local root = obj:FindFirstChild("HumanoidRootPart") or obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart") or obj:FindFirstChild("Base") or obj:FindFirstChild("Main")
-    if not root then for _,d in ipairs(obj:GetDescendants()) do if d:IsA("BasePart") then root=d; break end end end
-    if not root and obj:IsA("BasePart") then root = obj end
-    if not root then return end
-    pcall(function()
-        local hl = Instance.new("Highlight"); hl.Name=tag; hl.FillColor=color; hl.FillTransparency=0.8; hl.OutlineColor=color; hl.OutlineTransparency=0; hl.DepthMode=Enum.HighlightDepthMode.AlwaysOnTop; hl.Adornee=obj; hl.Parent=obj
-        local bb = Instance.new("BillboardGui"); bb.Name=tag.."_bb"; bb.Adornee=root; bb.Size=UDim2.new(0,100,0,20); bb.StudsOffset=Vector3.new(0,isChar and 3.5 or 3.8,0); bb.AlwaysOnTop=true; bb.MaxDistance=1000; bb.Parent=obj
-        local lbl = Instance.new("TextLabel"); lbl.Size=UDim2.new(1,0,1,0); lbl.BackgroundTransparency=1; lbl.TextColor3=color; lbl.TextStrokeTransparency=0.5; lbl.TextStrokeColor3=Color3.new(0,0,0); lbl.TextSize=15; lbl.FontFace=Font.new("rbxasset://fonts/families/AccanthisADFStd.json"); lbl.Parent=bb
-        if isChar then
-            local hum=obj:FindFirstChildOfClass("Humanoid")
-            if hum then
-                lbl.Text=obj.Name.." (100%)"
-                local c=hum.HealthChanged:Connect(function() if lbl.Parent then lbl.Text=obj.Name.." ("..math.floor(hum.Health/hum.MaxHealth*100).."%)"; end end)
-                esp.healthConns[obj]=c
-            else lbl.Text=obj.Name end
-        else
-            local prog=obj:FindFirstChild("Progress")
-            if prog and prog:IsA("NumberValue") then
-                lbl.Text=math.floor(prog.Value).."%"
-                local c=prog.Changed:Connect(function() if lbl.Parent then lbl.Text=math.floor(prog.Value).."%" end end)
-                esp.progConns[obj]=c
-            else lbl.Text=obj.Name end
-        end
-    end)
-    if esp.guardConns[obj] then pcall(function() esp.guardConns[obj]:Disconnect() end) end
-    esp.guardConns[obj] = obj.ChildRemoved:Connect(function(removed)
-        if removed.Name~=tag and removed.Name~=(tag.."_bb") then return end
-        task.defer(function()
-            if not obj or not obj.Parent then return end
-            if not isChar and espItemHeld(obj) then return end
-            espAttach(obj,tag,color,isChar)
-        end)
-    end)
+local function GetTeamFolderESP(name)
+    local pNode = svc.WS:FindFirstChild("Players")
+    return pNode and pNode:FindFirstChild(name)
 end
 
-espDetach = function(obj, tag)
-    if not obj then return end
-    if esp.guardConns[obj] then pcall(function() esp.guardConns[obj]:Disconnect() end); esp.guardConns[obj]=nil end
-    pcall(function()
-        for _,name in ipairs({tag, tag.."_bb"}) do local c=obj:FindFirstChild(name); if c then c:Destroy() end end
-        if esp.healthConns[obj] then esp.healthConns[obj]:Disconnect(); esp.healthConns[obj]=nil end
-        if esp.progConns[obj]   then esp.progConns[obj]:Disconnect();   esp.progConns[obj]=nil   end
-    end)
+local function GetMapContentESP()
+    local iGame = svc.WS:FindFirstChild("Map") and svc.WS.Map:FindFirstChild("Ingame")
+    return iGame and iGame:FindFirstChild("Map")
 end
 
-local function espDoKillers(on)
-    if not esp.killerFolder then return end
-    for _,k in ipairs(esp.killerFolder:GetChildren()) do if k:IsA("Model") then if on then espAttach(k,"esp_k",Color3.fromRGB(255,80,80),true) else espDetach(k,"esp_k") end end end
-end
-local function espDoSurvivors(on)
-    if not esp.survivorFolder then return end
-    for _,s in ipairs(esp.survivorFolder:GetChildren()) do if s:IsA("Model") then if on then espAttach(s,"esp_s",Color3.fromRGB(50,255,50),true) else espDetach(s,"esp_s") end end end
-end
-local function espDoGenerators(on)
-    local map=getMapContent(); if not map then return end
-    for _,obj in ipairs(map:GetChildren()) do if obj.Name=="Generator" then if on then espAttach(obj,"esp_g",Color3.fromRGB(255,105,180),false) else espDetach(obj,"esp_g") end end end
-end
-local function espDoItems(on)
-    for _,obj in ipairs(svc.WS:GetDescendants()) do
-        if obj.Name=="BloxyCola" or obj.Name=="Medkit" then
-            if not espItemHeld(obj) then
-                if on then espAttach(obj,"esp_i",espItemColor(obj.Name),false) else espDetach(obj,"esp_i") end
+-- ============================================================================
+-- GENERATOR TRACKING
+-- ============================================================================
+
+local GeneratorProgress = {}
+local TotalGenerators = 0
+
+local function UpdateGeneratorCount()
+    local mc = GetMapContentESP()
+    if not mc then return end
+    
+    TotalGenerators = 0
+    GeneratorProgress = {}
+    
+    for _, obj in ipairs(mc:GetChildren()) do
+        if obj.Name == "Generator" then
+            TotalGenerators = TotalGenerators + 1
+            local progress = obj:FindFirstChild("Progress")
+            if progress and progress:IsA("NumberValue") then
+                GeneratorProgress[obj] = progress.Value
+            else
+                GeneratorProgress[obj] = 0
             end
         end
     end
 end
-local function espDoBuildings(on)
-    local ig=getIngame(); if not ig then return end
-    for _,obj in ipairs(ig:GetChildren()) do if obj.Name=="BuildermanSentry" or obj.Name=="SubspaceTripmine" or obj.Name=="BuildermanDispenser" then if on then espAttach(obj,"esp_b",Color3.fromRGB(255,80,0),false) else espDetach(obj,"esp_b") end end end
+
+local function GetGeneratorText(obj)
+    local progress = GeneratorProgress[obj] or 0
+    local completed = math.floor(progress / 25)
+    return string.format("%s [%d/4]", obj.Name, completed)
 end
 
-local function espBindPlayers()
-    for _,c in pairs(esp.playerConns) do if c.Connected then c:Disconnect() end end; esp.playerConns={}
-    if esp.killerFolder then
-        table.insert(esp.playerConns, esp.killerFolder.ChildAdded:Connect(function(ch) task.wait(0.2); if esp.killers and ch and ch.Parent and ch:IsA("Model") then espAttach(ch,"esp_k",Color3.fromRGB(255,80,80),true) end end))
-        table.insert(esp.playerConns, esp.killerFolder.ChildRemoved:Connect(function(ch) espDetach(ch,"esp_k") end))
-    end
-    if esp.survivorFolder then
-        table.insert(esp.playerConns, esp.survivorFolder.ChildAdded:Connect(function(ch) task.wait(0.2); if esp.survivors and ch and ch.Parent and ch:IsA("Model") then espAttach(ch,"esp_s",Color3.fromRGB(50,255,50),true) end end))
-        table.insert(esp.playerConns, esp.survivorFolder.ChildRemoved:Connect(function(ch) espDetach(ch,"esp_s") end))
-    end
-end
-local function espBindWorld()
-    for _,c in pairs(esp.mapConns) do if c.Connected then c:Disconnect() end end; esp.mapConns={}
-    local ig=getIngame(); if not ig then return end
-    table.insert(esp.mapConns, ig.ChildAdded:Connect(function(obj)
-        task.wait(0.2)
-        if esp.buildings and (obj.Name=="BuildermanSentry" or obj.Name=="SubspaceTripmine" or obj.Name=="BuildermanDispenser") then espAttach(obj,"esp_b",Color3.fromRGB(255,80,0),false) end
-        if obj.Name=="Map" then
-            task.wait(1); esp.mapFolder=obj
-            itemTP.pickedUp = 0  -- reset item pickup counter for new match
-            obj.ChildAdded:Connect(function(child) task.wait(0.2); if esp.generators and child.Name=="Generator" then espAttach(child,"esp_g",Color3.fromRGB(255,105,180),false) end end)
-            obj.ChildRemoved:Connect(function(child) if child.Name=="Generator" then espDetach(child,"esp_g") end end)
-            if esp.generators then task.spawn(function() espDoGenerators(true) end) end
-            if esp.items      then task.spawn(function() espDoItems(true) end)      end
+-- ============================================================================
+-- CLEANUP FUNCTIONS
+-- ============================================================================
+
+local function RemoveESP(object)
+    if not object then return end
+    
+    if EngineState.Connections[object] then
+        for _, cx in ipairs(EngineState.Connections[object]) do
+            if cx then cx:Disconnect() end
         end
-    end))
-    table.insert(esp.mapConns, ig.ChildRemoved:Connect(function(obj)
-        if obj.Name=="BuildermanSentry" or obj.Name=="SubspaceTripmine" then espDetach(obj,"esp_b") end
-        if obj.Name=="Map" then esp.mapFolder=nil end
-    end))
-    table.insert(esp.mapConns, svc.WS.DescendantAdded:Connect(function(obj)
-        if not esp.items then return end
-        if obj.Name ~= "BloxyCola" and obj.Name ~= "Medkit" then return end
-        task.wait(0.2); if obj and obj.Parent and not espItemHeld(obj) then espAttach(obj,"esp_i",espItemColor(obj.Name),false) end
-    end))
-    local existing=getMapContent(); if existing then esp.mapFolder=existing; task.spawn(function() task.wait(2); if esp.generators then espDoGenerators(true) end; if esp.items then espDoItems(true) end end) end
+        EngineState.Connections[object] = nil
+    end
+
+    local cache = EngineState.Pool[object]
+    if cache then
+        pcall(function()
+            if cache.Highlight then cache.Highlight:Destroy() end
+            if cache.Billboard then cache.Billboard:Destroy() end
+        end)
+        EngineState.Pool[object] = nil
+    end
 end
 
-secESP:Toggle({ Title="Killers",    Type="Checkbox", Flag="espKillers",    Default=esp.killers,    Callback=function(on) esp.killers=on;    task.spawn(function() espDoKillers(on)    end) end })
-secESP:Toggle({ Title="Survivors",  Type="Checkbox", Flag="espSurvivors",  Default=esp.survivors,  Callback=function(on) esp.survivors=on;  task.spawn(function() espDoSurvivors(on)  end) end })
-secESP:Toggle({ Title="Generators", Type="Checkbox", Flag="espGenerators", Default=esp.generators, Callback=function(on) esp.generators=on; task.spawn(function() espDoGenerators(on) end) end })
-secESP:Toggle({ Title="Items",      Type="Checkbox", Flag="espItems",      Default=esp.items,      Callback=function(on) esp.items=on;      task.spawn(function() espDoItems(on)      end) end })
-secESP:Toggle({ Title="Buildings",  Type="Checkbox", Flag="espBuildings",  Default=esp.buildings,  Callback=function(on) esp.buildings=on;  task.spawn(function() espDoBuildings(on)  end) end })
+-- ============================================================================
+-- CORE ALLOCATION ENGINE - FIXED: Only attaches to main model, not body parts
+-- ============================================================================
+
+local function AddESP(object, tag, defaultColor, isCharacter)
+    if not object or not object.Parent then return end
+    if EngineState.Pool[object] then return end
+    
+    -- Skip if this is a body part (not a model)
+    if not object:IsA("Model") then return end
+    
+    -- Skip if it's the local player's character
+    if object == lp.Character then return end
+
+    -- Find root part
+    local root = object:FindFirstChild("HumanoidRootPart")
+        or object.PrimaryPart
+        or object:FindFirstChildWhichIsA("BasePart")
+
+    if not root then return end
+
+    EngineState.Connections[object] = {}
+
+    -- Billboard
+    local bGui = Instance.new("BillboardGui")
+    bGui.Name = "ESP_" .. tag
+    bGui.Adornee = root
+    bGui.Size = UDim2.new(0, 180, 0, 35)
+    bGui.StudsOffset = Vector3.new(0, isCharacter and 3.5 or 2.5, 0)
+    bGui.AlwaysOnTop = true
+    bGui.MaxDistance = ESP_CONFIG.MaxDistance
+    bGui.Parent = object
+
+    local tLabel = Instance.new("TextLabel")
+    tLabel.Size = UDim2.new(1, 0, 1, 0)
+    tLabel.BackgroundTransparency = 1
+    tLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+    tLabel.TextStrokeTransparency = 0.3
+    tLabel.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+    tLabel.TextSize = 13
+    tLabel.Font = Enum.Font.GothamBold
+    tLabel.Text = object.Name
+    tLabel.Parent = bGui
+
+    local data = {
+        Object = object,
+        RootPart = root,
+        Tag = tag,
+        Billboard = bGui,
+        TextLabel = tLabel,
+        BaseColor = defaultColor,
+        IsCharacter = isCharacter,
+        HPPercent = 100,
+        Highlight = nil
+    }
+    EngineState.Pool[object] = data
+
+    -- Health tracking for characters
+    if isCharacter then
+        local hum = object:FindFirstChildOfClass("Humanoid")
+        if hum then
+            local function UpdateHealth()
+                local mHp = math.max(hum.MaxHealth, 1)
+                local pct = (hum.Health / mHp) * 100
+                data.HPPercent = math.floor(pct + 0.5)
+                
+                -- Format based on type
+                if data.Tag == "Killer" then
+                    data.TextLabel.Text = string.format("[KILLER] %s [%d%%]", object.Name, data.HPPercent)
+                    data.TextLabel.TextColor3 = ESP_CONFIG.KillerColor
+                else
+                    -- Survivors - Gold with health color
+                    local healthColor = GetHealthColor(pct)
+                    data.TextLabel.Text = string.format("%s [%d%%]", object.Name, data.HPPercent)
+                    data.TextLabel.TextColor3 = healthColor
+                    data.BaseColor = ESP_CONFIG.SurvivorColor
+                end
+                
+                if data.Highlight then
+                    if data.Tag == "Killer" then
+                        data.Highlight.FillColor = ESP_CONFIG.KillerColor
+                        data.Highlight.OutlineColor = ESP_CONFIG.KillerColor
+                    else
+                        data.Highlight.FillColor = ESP_CONFIG.SurvivorColor
+                        data.Highlight.OutlineColor = ESP_CONFIG.SurvivorColor
+                    end
+                end
+            end
+            UpdateHealth()
+            table.insert(EngineState.Connections[object], hum.HealthChanged:Connect(UpdateHealth))
+        end
+    else
+        -- Generator tracking
+        if tag == "Generator" then
+            local progress = object:FindFirstChild("Progress")
+            if progress and progress:IsA("NumberValue") then
+                local function UpdateGenerator()
+                    GeneratorProgress[object] = progress.Value
+                    data.TextLabel.Text = GetGeneratorText(object)
+                end
+                UpdateGenerator()
+                table.insert(EngineState.Connections[object], progress.Changed:Connect(UpdateGenerator))
+            else
+                data.TextLabel.Text = GetGeneratorText(object)
+            end
+            data.TextLabel.TextColor3 = ESP_CONFIG.GeneratorColor
+            data.BaseColor = ESP_CONFIG.GeneratorColor
+        else
+            -- Items and Buildings
+            data.TextLabel.Text = object.Name
+            data.TextLabel.TextColor3 = defaultColor
+            data.BaseColor = defaultColor
+        end
+    end
+
+    -- Highlight (glow effect)
+    local hl = Instance.new("Highlight")
+    hl.Name = "ESPGlow_" .. tag
+    hl.FillColor = data.BaseColor
+    hl.FillTransparency = 0.7
+    hl.OutlineColor = data.BaseColor
+    hl.OutlineTransparency = 0.2
+    hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+    hl.Adornee = object
+    hl.Parent = object
+    data.Highlight = hl
+
+    -- Auto cleanup
+    table.insert(EngineState.Connections[object], object.AncestryChanged:Connect(function(_, pNode)
+        if not pNode then RemoveESP(object) end
+    end))
+end
+
+-- ============================================================================
+-- SCAN FUNCTIONS - FIXED: Only scans Models, ignores body parts
+-- ============================================================================
+
+local function ScanAll()
+    if not win or not win.Flags then return end
+    if not (win.Flags.espSurv or win.Flags.espKiller or win.Flags.espGens or win.Flags.espHatch or win.Flags.espGates) then
+        return
+    end
+
+    local map = svc.WS:FindFirstChild("Map")
+    local ingame = map and map:FindFirstChild("Ingame")
+    local currentMap = ingame and ingame:FindFirstChild("Map")
+
+    if currentMap then
+        -- 1. CLEAN SCAN FOR GENERATORS & OBJECTS
+        local objects = currentMap:FindFirstChild("Objects")
+        if objects and win.Flags.espGens then
+            for _, obj in ipairs(objects:GetChildren()) do
+                -- Only tag if it's actually a generator container, not its sub-parts
+                if obj:IsA("Model") and string.find(obj.Name:lower(), "generator") then
+                    if not EngineState.Pool[obj] then
+                        AddESP(obj, "Generator", ESP_CONFIG.GeneratorColor, false)
+                    end
+                end
+            end
+        end
+
+        -- 2. CLEAN SCAN FOR SURVIVORS / RIGS (Filtering out "BodyParts")
+        local chars = currentMap:FindFirstChild("Characters")
+        if chars then
+            for _, char in ipairs(chars:GetChildren()) do
+                if char:IsA("Model") then
+                    -- CRITICAL FIX: If the model is named "BodyParts", it's a sub-assembly!
+                    -- We skip tagging it to avoid visual clutter on the screen.
+                    if char.Name == "BodyParts" or char:FindFirstChild("BodyParts") then
+                        -- Check if this is a survivor/killer group container instead of raw parts
+                        continue
+                    end
+
+                    -- Determine if it's a Killer or Survivor based on game indicators
+                    local isKiller = char:GetAttribute("Killer") or char:FindFirstChild("Knife") or false
+                    
+                    if isKiller and win.Flags.espKiller then
+                        if not EngineState.Pool[char] then
+                            AddESP(char, "Killer", ESP_CONFIG.KillerColor, true)
+                        end
+                    elseif not isKiller and win.Flags.espSurv then
+                        if not EngineState.Pool[char] then
+                            -- Give it a clean name instead of showing internal rig names
+                            if char.Name:lower() == "model" or char.Name == "" then
+                                char.Name = "Survivor"
+                            end
+                            AddESP(char, "Survivor", ESP_CONFIG.SurvivorColor, true)
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+
+    if ESP_CONFIG.Buildings then
+        local ig = svc.WS:FindFirstChild("Map") and svc.WS.Map:FindFirstChild("Ingame")
+        if ig then
+            local buildingNames = {"BuildermanSentry", "SubspaceTripmine", "BuildermanDispenser"}
+            for _, obj in ipairs(ig:GetChildren()) do
+                for _, name in ipairs(buildingNames) do
+                    if obj.Name == name then
+                        AddESP(obj, "Building", ESP_CONFIG.BuildingColor, false)
+                        break
+                    end
+                end
+            end
+        end
+    end
+end
+
+-- ============================================================================
+-- BACKGROUND SCAN THREAD
+-- ============================================================================
+
+task.spawn(function()
+    while true do
+        pcall(ScanAll)
+        task.wait(2)
+    end
+end)
+
+-- ============================================================================
+-- WATCH FOR NEW OBJECTS - FIXED: Only watches Models
+-- ============================================================================
+
+svc.WS.DescendantAdded:Connect(function(obj)
+    task.wait(0.5)
+    
+    -- Only process models
+    if not obj:IsA("Model") then return end
+    
+    if ESP_CONFIG.Killers then
+        local f = GetTeamFolderESP("Killers")
+        if f and obj:IsDescendantOf(f) and obj ~= lp.Character then
+            AddESP(obj, "Killer", ESP_CONFIG.KillerColor, true)
+        end
+    end
+    
+    if ESP_CONFIG.Survivors then
+        local f = GetTeamFolderESP("Survivors")
+        if f and obj:IsDescendantOf(f) and obj ~= lp.Character then
+            AddESP(obj, "Survivor", ESP_CONFIG.SurvivorColor, true)
+        end
+    end
+    
+    if ESP_CONFIG.Generators and obj.Name == "Generator" then
+        AddESP(obj, "Generator", ESP_CONFIG.GeneratorColor, false)
+    end
+    
+    if ESP_CONFIG.Buildings then
+        local buildingNames = {"BuildermanSentry", "SubspaceTripmine", "BuildermanDispenser"}
+        for _, name in ipairs(buildingNames) do
+            if obj.Name == name then
+                AddESP(obj, "Building", ESP_CONFIG.BuildingColor, false)
+                break
+            end
+        end
+    end
+end)
+
+-- Also watch for new parts inside models for items
+svc.WS.DescendantAdded:Connect(function(obj)
+    if not obj:IsA("BasePart") then return end
+    if not ESP_CONFIG.Items then return end
+    if obj.Name ~= "BloxyCola" and obj.Name ~= "Medkit" then return end
+    
+    task.wait(0.5)
+    local held = false
+    for _, player in ipairs(svc.Players:GetPlayers()) do
+        if player.Character and obj:IsDescendantOf(player.Character) then
+            held = true
+            break
+        end
+        local bp = player:FindFirstChildOfClass("Backpack")
+        if bp and obj:IsDescendantOf(bp) then
+            held = true
+            break
+        end
+    end
+    if not held then
+        local parent = obj.Parent
+        if parent and parent:IsA("Model") then
+            AddESP(parent, "Item", GetItemColor(obj.Name), false)
+        else
+            AddESP(obj, "Item", GetItemColor(obj.Name), false)
+        end
+    end
+end)
+
+-- ============================================================================
+-- UI TOGGLES (WindUI)
+-- ============================================================================
+
+secESP:Toggle({ Title="👹 Killers (Dark Red)", Type="Checkbox", Flag="espKillers", Default=ESP_CONFIG.Killers,
+    Callback=function(on) ESP_CONFIG.Killers=on; if on then pcall(ScanAll) end end })
+
+secESP:Toggle({ Title="👥 Survivors (Gold)", Type="Checkbox", Flag="espSurvivors", Default=ESP_CONFIG.Survivors,
+    Callback=function(on) ESP_CONFIG.Survivors=on; if on then pcall(ScanAll) end end })
+
+secESP:Toggle({ Title="⚙️ Generators (0/4)", Type="Checkbox", Flag="espGenerators", Default=ESP_CONFIG.Generators,
+    Callback=function(on) ESP_CONFIG.Generators=on; if on then pcall(ScanAll) end end })
+
+secESP:Toggle({ Title="📦 Items (Cyan/Orange)", Type="Checkbox", Flag="espItems", Default=ESP_CONFIG.Items,
+    Callback=function(on) ESP_CONFIG.Items=on; if on then pcall(ScanAll) end end })
+
+secESP:Toggle({ Title="🏗️ Buildings (Purple)", Type="Checkbox", Flag="espBuildings", Default=ESP_CONFIG.Buildings,
+    Callback=function(on) ESP_CONFIG.Buildings=on; if on then pcall(ScanAll) end end })
+
+secESP:Button({ Title="🔄 Refresh ESP", Callback=function() pcall(ScanAll) end })
 
 ------------------------------------------------------------------------
--- Minion + Puddle ESP
+-- Minion + Puddle ESP (Kept from original)
 ------------------------------------------------------------------------
 local secMinion = tabVisual:Section({ Title = "Minion & Ability ESP", Opened = true })
 local mset = { pizza=false, zombie=false, puddle=false, transparency=0.25 }
@@ -1414,40 +1685,20 @@ end
 task.spawn(function()
     while true do
         task.wait(3)
-        if esp.killers    then task.spawn(function() espDoKillers(true)    end) end
-        if esp.survivors  then task.spawn(function() espDoSurvivors(true)  end) end
-        if esp.generators then task.spawn(function() espDoGenerators(true) end) end
-        if esp.items      then task.spawn(function() espDoItems(true)      end) end
-        if esp.buildings  then task.spawn(function() espDoBuildings(true)  end) end
         scanPizza(); scanZombie(); scanPuddles()
     end
 end)
 
 task.spawn(function()
     task.wait(3)
-    local pf=svc.WS:FindFirstChild("Players")
-    if pf then
-        esp.killerFolder=pf:FindFirstChild("Killers"); esp.survivorFolder=pf:FindFirstChild("Survivors")
-        espBindPlayers()
-        if esp.killers   then task.spawn(function() espDoKillers(true)   end) end
-        if esp.survivors then task.spawn(function() espDoSurvivors(true) end) end
-    end
-    espBindWorld()
-    if esp.buildings then task.spawn(function() espDoBuildings(true) end) end
     setupMinionWatcher()
     if mset.pizza  then scanPizza()   end
     if mset.zombie then scanZombie()  end
     if mset.puddle then scanPuddles() end
-    esp.ready=true
 end)
 
 lp.CharacterAdded:Connect(function()
-    task.wait(4); espBindPlayers(); espBindWorld()
-    if esp.killers    then task.spawn(function() espDoKillers(true)    end) end
-    if esp.survivors  then task.spawn(function() espDoSurvivors(true)  end) end
-    if esp.generators then task.spawn(function() espDoGenerators(true) end) end
-    if esp.items      then task.spawn(function() espDoItems(true)      end) end
-    if esp.buildings  then task.spawn(function() espDoBuildings(true)  end) end
+    task.wait(4)
     if mset.pizza  then scanPizza()   end
     if mset.zombie then scanZombie()  end
     if mset.puddle then scanPuddles() end
@@ -1460,7 +1711,7 @@ secMinion:Slider({ Title="Highlight Transparency", Flag="espMinionTrans", Step=0
 secMinion:Button({ Title="🔄 Force Rescan", Callback=function() clearTag("pizza"); clearTag("zombie"); clearTag("puddle"); task.wait(0.1); scanPizza(); scanZombie(); scanPuddles() end })
 
 ------------------------------------------------------------------------
--- Document / Ring ESP
+-- Document / Ring ESP (Kept from original)
 ------------------------------------------------------------------------
 pcall(function()
     local docESPEnabled = false
@@ -1556,8 +1807,8 @@ local tabMusic = win:Tab({ Title = "Music", Icon = "music", IconColor = Color3.f
 local secLMS   = tabMusic:Section({ Title = "LMS Music", Opened = true })
 
 local music = { on=false, selected="CondemnedLMS", cached={}, origId=nil, thread=nil }
-local musicDir = "SAKIWARE/LMS_Songs"
-if not fs.hasFolder("SAKIWARE") then fs.makeFolder("SAKIWARE") end
+local musicDir = "HUTAO/LMS_Songs"
+if not fs.hasFolder("HUTAO") then fs.makeFolder("HUTAO") end
 if not fs.hasFolder(musicDir) then fs.makeFolder(musicDir) end
 local musicTracks = {
     ["AbberantLMS"]              = "https://files.catbox.moe/4bb0g9.mp3",
@@ -1586,12 +1837,9 @@ local function musicFetch(name)
     if not fs.hasFile(path) then local ok,data=pcall(function() return game:HttpGet(url) end); if not ok or not data or #data==0 then return nil end; fs.write(path,data) end
     music.cached[name]=fs.asset(path); return music.cached[name]
 end
--- FIX: LastSurvivor sound only exists during a round, not in lobby.
--- Poll for it so musicGetSound() always returns the live instance if present.
 local function musicGetSound()
     local t = svc.WS:FindFirstChild("Themes")
     if not t then return nil end
-    -- Try direct child first, then deep search in case it's nested
     return t:FindFirstChild("LastSurvivor") or t:FindFirstChild("LastSurvivor", true)
 end
 local function musicPlay(name)
@@ -1823,8 +2071,6 @@ do
     end, Type = "Checkbox"})
 end
 
-
-
 ------------------------------------------------------------------------
 ------------------------------------------------------------------------
 -- TAB: CHANCE
@@ -1993,7 +2239,6 @@ end
 local tabVeeronica = win:Tab({ Title = "Veeronica", Icon = "zap", IconColor = Color3.fromHex("#39FF14"), ShowTabTitle = false })
 
 local sec_022 = tabVeeronica:Section({ Title = "Auto Trick", Opened = true })
-
 
 do
     local atEnabled = false
@@ -2376,8 +2621,6 @@ do
         end)
     end
 
-
-
     local function jd_buildCamCF(myHRP, killerHRP, v0, g)
         local hum=myHRP.Parent and myHRP.Parent:FindFirstChildOfClass("Humanoid")
         local hipH=hum and hum.HipHeight or 1.35
@@ -2432,7 +2675,6 @@ do
         rfDispatch:unregister("jd")
         jd_crystalCB = nil; jd_patched = false
     end
-
 
     -- Single merged hook: handles both CrystalInput and Axe detection
     local jd_holdActive = false
@@ -2522,7 +2764,6 @@ local tabDusekkar = win:Tab({ Title = "Dusekkar", Icon = "zap", IconColor = Colo
 do
     local sec_027 = tabDusekkar:Section({ Title = "PlasmaBeam Silent Aim", Opened = true })
 
-
     local plasma_enabled    = false
     local plasma_aimOffset  = 0.0
     local plasma_prediction = 0.12
@@ -2603,7 +2844,6 @@ local tabNoli = win:Tab({ Title = "Noli", Icon = "wind", IconColor = Color3.from
 
 do
     local sec_029 = tabNoli:Section({ Title = "Nova Silent Aim", Opened = true })
-
 
     local nova_enabled    = false
     local nova_aimOffset  = 0.0
@@ -2872,11 +3112,14 @@ local function aiKillerLoop()
             aiState.stuckCheck.time = now
         elseif now - aiState.stuckCheck.time >= 1.5 then
             local moved = (hrp.Position - aiState.stuckCheck.pos).Magnitude
-            if moved < 2 and (targetHRP.Position - hrp.Position).Magnitude > 8 then
-                -- Stuck — clear waypoints to force a fresh path next tick
-                aiState.waypoints = {}
-                aiState.wpIndex   = 1
-                aiState.lastPath  = 0  -- force immediate repath
+            if moved < 2 and aiState.target and aiState.target.root then
+                local targetHRP = aiState.target.root
+                if (targetHRP.Position - hrp.Position).Magnitude > 8 then
+                    -- Stuck — clear waypoints to force a fresh path next tick
+                    aiState.waypoints = {}
+                    aiState.wpIndex   = 1
+                    aiState.lastPath  = 0  -- force immediate repath
+                end
             end
             aiState.stuckCheck.pos  = hrp.Position
             aiState.stuckCheck.time = now
@@ -2968,12 +3211,10 @@ secAICtrl:Button({
     end
 })
 
-
-------------------------------------------------------------------------
-------------------------------------------------------------------------
--- TAB: GUEST 1337
-------------------------------------------------------------------------
-------------------------------------------------------------------------
+-- =========================================================================
+-- GUEST 1337 SECTION - WITH FIXED AUTO BLOCK (NO EXTRA RANGE)
+-- =========================================================================
+pcall(function()
 local tabGuest1337 = win:Tab({ Title = "Guest 1337", Icon = "shield", IconColor = Color3.fromHex("#FFD700"), ShowTabTitle = false })
 
 -- GUEST1337 — Auto Block & Combat
@@ -2981,29 +3222,33 @@ local tabGuest1337 = win:Tab({ Title = "Guest 1337", Icon = "shield", IconColor 
 local sec_015 = tabGuest1337:Section({ Title = "Auto Block & Combat", Opened = true })
 
 -- Settings
--- populate the forward-declared combatS with all fields
-combatS.blockType = "Block"
-combatS.detectionRange = 18
-combatS.blockDelay = 0
-combatS.doubleBlock = true
-combatS.antiBait = false
-combatS.abMissChance = 0
-combatS.autoPunchOn = false
-combatS.hdtEnabled = false
-combatS.hdtFlickSpeed = 22
-combatS.hdtDuration = 1.0
-combatS.hdtMissChance = 0
-combatS.hdtMoveSpeed = 26
-combatS.killerCircles = false
-combatS.facingCheck = true
-combatS.facingVisual = false
-combatS.facingVisRadius = 3
-combatS.aimPunchActive = false
-combatS.punchPrediction = 2.3
-combatS.aimPunchDuration = 0.5
--- Hitbox-based autoblock config
-combatS.hbTargetSize = Vector3.new(4.50, 6.00, 7.50)
-combatS.hbMargin     = 0.05
+local combatS = {
+    blockType = "Block",
+    detectionRange = 18,
+    blockDelay = 0,
+    doubleBlock = true,
+    antiBait = false,
+    abMissChance = 0,
+    autoPunchOn = false,
+    hdtEnabled = false,
+    hdtFlickSpeed = 22,
+    hdtDuration = 1.0,
+    hdtMissChance = 0,
+    hdtMoveSpeed = 26,
+    killerCircles = false,
+    facingCheck = true,
+    facingVisual = false,
+    facingVisRadius = 3,
+    aimPunchActive = false,
+    punchPrediction = 2.3,
+    aimPunchDuration = 0.5,
+    hbTargetSize    = Vector3.new(4.50, 6.00, 7.50),
+    hbMargin        = 0.05,
+    autoBlockOn      = false,           -- MAIN AUTO BLOCK TOGGLE
+    autoBlockMode    = "Hitbox",        -- "Hitbox", "Sounds", "Animations"
+    autoBlockAudioOn = false,           -- kept for backward compat but controlled by mode
+    autoBlockAnimOn  = false,           -- kept for backward compat but controlled by mode
+}
 
 -- Block anim IDs for HDT detection
 local BLOCK_ANIMS = {
@@ -3015,6 +3260,16 @@ local BLOCK_ANIMS = {
 local BAIT_KILLERS = {"John Doe","Slasher","c00lkidd","Jason","1x1x1x1","Noli","Sixer","Nosferatu"}
 local STRICT_FACING_DOT = 0.70
 local _cachedAnimator = nil
+
+local combatLastBlockTime = 0
+local BLOCK_CD            = 0.1
+
+local combatCachedHRP = nil
+local function combatCacheHRP(char)
+    combatCachedHRP = char:WaitForChild("HumanoidRootPart")
+end
+if lp.Character then combatCacheHRP(lp.Character) end
+lp.CharacterAdded:Connect(combatCacheHRP)
 
 local function combatIsFacing(myRoot, targetRoot, killerName)
     if not combatS.facingCheck then return true end
@@ -3040,7 +3295,6 @@ local function combatIsFacing(myRoot, targetRoot, killerName)
     return dot > STRICT_FACING_DOT
 end
 
--- Helper functions
 local function combatGetKillersFolder()
     local p = svc.WS:FindFirstChild("Players")
     return p and p:FindFirstChild("Killers")
@@ -3086,10 +3340,7 @@ local function combatFireAbility(abilityType)
     pcall(function() rem:FireServer(abilityType) end)
 end
 
--- Forward declaration (used by HDT)
-local combatGetKillerHRP
-
--- Punch animation IDs to trigger aim lock (from V1PRBLOCK)
+-- Punch animation IDs to trigger aim lock
 local combatTrackedPunchAnimations = {
     ["87259391926321"]=true,["140703210927645"]=true,["136007065400978"]=true,["129843313690921"]=true,
     ["86709774283672"]=true, ["108807732150251"]=true,["138040001965654"]=true,["86096387000557"]=true,
@@ -3103,8 +3354,8 @@ local combatTrackedPunchAnimations = {
 local combatPunchAiming          = false
 local combatPunchLastTriggerTime = 0
 local combatOriginalAutoRotate   = nil
-local combatOriginalHRPRotY      = nil   -- saved Y rotation before aim punch snaps HRP
-local combatOriginalHRPCFrame    = nil   -- saved full CFrame before aim punch
+local combatOriginalHRPCFrame    = nil
+local combatOriginalHRPRotY      = nil
 local combatAimConnection        = nil
 
 local function combatSetupAimPunch(char)
@@ -3118,7 +3369,6 @@ local function combatSetupAimPunch(char)
             local c = lp.Character
             local h = c and c:FindFirstChild("Humanoid")
             local r = c and c:FindFirstChild("HumanoidRootPart")
-            -- Only save if not already mid-punch so we don't overwrite the original rotation
             if h and r and not combatPunchAiming then
                 combatOriginalAutoRotate = h.AutoRotate
                 combatOriginalHRPCFrame  = r.CFrame
@@ -3130,7 +3380,7 @@ local function combatSetupAimPunch(char)
     end)
 end
 
--- Aim-punch RenderStepped (aims toward nearest killer while punch animation plays)
+-- Aim-punch RenderStepped
 svc.Run.RenderStepped:Connect(function()
     if not combatS.aimPunchActive then
         if combatPunchAiming then
@@ -3196,58 +3446,311 @@ svc.Run.RenderStepped:Connect(function()
     end
 end)
 
--- Auto Block (Hitbox-based) — hitbox detection replacing old sound system
-local combatLastBlockTime = 0
-local BLOCK_CD            = 0.1
+-- Auto Block (SOUNDS)
+local TRIGGER_SOUNDS = {
+    ["140242176732868"]=true,["136323728355613"]=true,
+    ["115026634746636"]=true,["84116622032112"]=true, ["108907358619313"]=true,["127793641088496"]=true,
+    ["86174610237192"]=true, ["95079963655241"]=true, ["101199185291628"]=true,["119942598489800"]=true,
+    ["84307400688050"]=true, ["105200830849301"]=true,["75330693422988"]=true,
+    ["82221759983649"]=true, ["81702359653578"]=true, ["85853080745515"]=true,
+    ["108610718831698"]=true,["112395455254818"]=true,["109431876587852"]=true,["12222216"]=true,
+    ["79980897195554"]=true, ["119583605486352"]=true,["71834552297085"]=true, ["116581754553533"]=true,
+    ["86833981571073"]=true, ["110372418055226"]=true,["105840448036441"]=true,["86494585504534"]=true,
+    ["80516583309685"]=true, ["131406927389838"]=true,["89004992452376"]=true, ["117231507259853"]=true,
+    ["101698569375359"]=true,["101553872555606"]=true,["140412278320643"]=true,["106300477136129"]=true,
+    ["117173212095661"]=true,["104910828105172"]=true,["140194172008986"]=true,["85544168523099"]=true,
+    ["114506382930939"]=true,["99829427721752"]=true, ["120059928759346"]=true,["104625283622511"]=true,
+    ["105316545074913"]=true,["126131675979001"]=true,["82336352305186"]=true, ["93366464803829"]=true,
+    ["84069821282466"]=true, ["128856426573270"]=true,["121954639447247"]=true,["128195973631079"]=true,
+    ["124903763333174"]=true,["94317217837143"]=true, ["98111231282218"]=true, ["119089145505438"]=true,
+    ["136728245733659"]=true,["107444859834748"]=true,["76959687420003"]=true,
+    ["72425554233832"]=true, ["96594507550917"]=true, ["139996647355899"]=true,["107345261604889"]=true,
+    ["127557531826290"]=true,["108651070773439"]=true,["74842815979546"]=true, ["124397369810639"]=true,
+    ["76467993976301"]=true, ["118493324723683"]=true,["78298577002481"]=true, ["116527305931161"]=true,
+    ["5148302439"]=true,     ["98675142200448"]=true, ["128367348686124"]=true,["71805956520207"]=true,
+    ["125213046326879"]=true,["103684883268194"]=true,["109246041199659"]=true,
+    ["80540530406270"]=true, ["139523195429581"]=true,["105204810054381"]=true,["114742322778642"]=true,
+    ["116468089135195"]=true,["112809109188560"]=true,["109348678063422"]=true,
+}
 
--- Cached HRP for zero-cost access every frame
-local combatCachedHRP = nil
-local function combatCacheHRP(char)
-    combatCachedHRP = char:WaitForChild("HumanoidRootPart")
+local soundHooks        = {}
+local soundBlockedUntil = {}
+local AUDIO_LOCAL_CD    = 0.35
+local AUDIO_SOUND_THROT = 1.0
+local lastSoundBlockTime = 0
+
+local function combatExtractSoundId(sound)
+    if not sound then return nil end
+    local sid = tostring(sound.SoundId or "")
+    return sid:match("rbxassetid://(%d+)") or sid:match("://(%d+)") or sid:match("^(%d+)$")
 end
-if lp.Character then combatCacheHRP(lp.Character) end
-lp.CharacterAdded:Connect(combatCacheHRP)
 
--- Dynamic radius: widens automatically when ping is high
+local function combatGetSoundWorldPos(sound)
+    local p = sound.Parent
+    if p then
+        if p:IsA("BasePart") then return p.Position, p end
+        if p:IsA("Attachment") and p.Parent and p.Parent:IsA("BasePart") then
+            return p.Parent.Position, p.Parent
+        end
+    end
+    local kf = combatGetKillersFolder()
+    if kf and sound:IsDescendantOf(kf) then
+        local f = (p or sound):FindFirstChildWhichIsA("BasePart", true)
+        if f then return f.Position, f end
+    end
+    return nil, nil
+end
+
+local function combatGetCharFromDesc(inst)
+    if not inst then return nil end
+    local m = inst:FindFirstAncestorOfClass("Model")
+    return (m and m:FindFirstChildOfClass("Humanoid")) and m or nil
+end
+
+local function combatAttemptSoundBlock(sound, preId)
+    if not combatS.autoBlockOn then return end
+    if combatS.autoBlockMode ~= "Sounds" then return end
+    if not sound or not sound:IsA("Sound") then return end
+    if not sound.IsPlaying then return end
+    local now = tick()
+    local id = preId or combatExtractSoundId(sound)
+    if not id or not TRIGGER_SOUNDS[id] then return end
+    if soundBlockedUntil[sound] and now < soundBlockedUntil[sound] then return end
+    if now - lastSoundBlockTime < AUDIO_LOCAL_CD then return end
+
+    local myRoot = combatCachedHRP; if not myRoot then return end
+    local _, soundPart = combatGetSoundWorldPos(sound); if not soundPart then return end
+    local char = combatGetCharFromDesc(soundPart); if not char then return end
+    local hrp  = char:FindFirstChild("HumanoidRootPart"); if not hrp then return end
+
+    local kf = combatGetKillersFolder(); if not kf then return end
+    if not char:IsDescendantOf(kf) then return end
+
+    local dist = (hrp.Position - myRoot.Position).Magnitude
+    -- FIX: Use exact detection range, NO extra +3
+    if dist > combatS.detectionRange then return end
+    if not combatIsFacing(myRoot, hrp, char.Name) then return end
+
+    lastSoundBlockTime = now
+    soundBlockedUntil[sound] = now + AUDIO_SOUND_THROT
+
+    local doFire = function()
+        if combatS.blockType == "Block" then
+            combatFireAbility("Block")
+            if combatS.doubleBlock then combatFireAbility("Punch") end
+        elseif combatS.blockType == "Charge" then
+            combatFireAbility("Charge")
+        elseif combatS.blockType == "7n7 Clone" then
+            combatFireAbility("Clone")
+        end
+    end
+    if combatS.blockDelay > 0 then task.delay(combatS.blockDelay, doFire) else doFire() end
+end
+
+local function combatHookSound(sound)
+    if not sound or not sound:IsA("Sound") then return end
+    if soundHooks[sound] then return end
+    local preId = combatExtractSoundId(sound)
+    local playedConn = sound.Played:Connect(function()
+        combatAttemptSoundBlock(sound, preId)
+    end)
+    local propConn = sound:GetPropertyChangedSignal("IsPlaying"):Connect(function()
+        if sound.IsPlaying then combatAttemptSoundBlock(sound, preId) end
+    end)
+    local destroyConn; destroyConn = sound.Destroying:Connect(function()
+        pcall(function() playedConn:Disconnect(); propConn:Disconnect(); destroyConn:Disconnect() end)
+        soundHooks[sound] = nil; soundBlockedUntil[sound] = nil
+    end)
+    soundHooks[sound] = { playedConn, propConn, destroyConn }
+    if sound.IsPlaying then combatAttemptSoundBlock(sound, preId) end
+end
+
+-- FIXED: combatSetupSoundHooks now scans both killers folder AND workspace
+local function combatSetupSoundHooks()
+    local kf = combatGetKillersFolder()
+    if not kf then return end
+    
+    -- Scan existing sounds in killers folder
+    for _, d in ipairs(kf:GetDescendants()) do
+        if d:IsA("Sound") then 
+            pcall(combatHookSound, d) 
+        end
+    end
+    
+    -- Watch for new sounds in killers folder
+    kf.DescendantAdded:Connect(function(d)
+        if d:IsA("Sound") then 
+            pcall(combatHookSound, d) 
+        end
+    end)
+    
+    -- Also scan workspace for sounds that might be outside killers folder
+    for _, d in ipairs(svc.WS:GetDescendants()) do
+        if d:IsA("Sound") and d:IsDescendantOf(combatGetKillersFolder()) then
+            pcall(combatHookSound, d)
+        end
+    end
+    
+    -- Watch workspace for new killer sounds
+    svc.WS.DescendantAdded:Connect(function(d)
+        if d:IsA("Sound") and d:IsDescendantOf(combatGetKillersFolder()) then
+            pcall(combatHookSound, d)
+        end
+    end)
+end
+
+-- Auto Block (ANIMATION)
+local TRIGGER_ANIMS = {
+    ["126830014841198"]=true,["126355327951215"]=true,["121086746534198"]=true,
+    ["18885909645"]=true,    ["98456918873918"]=true, ["105458270463374"]=true,
+    ["83829782357897"]=true, ["125403313786645"]=true,["118298475669935"]=true,
+    ["82113744478546"]=true, ["70371667919898"]=true, ["99135633258223"]=true,
+    ["97167027849946"]=true, ["109230267448394"]=true,["139835501033932"]=true,
+    ["126896426760253"]=true,["109667959938617"]=true,["126681776859538"]=true,
+    ["129976080405072"]=true,["121293883585738"]=true,["81639435858902"]=true,
+    ["137314737492715"]=true,["92173139187970"]=true, ["122709416391"]=true,
+    ["879895330952"]=true,
+    -- Added from M1 Animation Map
+    ["98031287364865"]=true, ["105614318732282"]=true, -- John Doe Punch
+    ["127324570265084"]=true,                           -- Slasher Slash
+    ["86710781315432"]=true, ["100725497418533"]=true,["106538427162796"]=true, -- Noli Stab
+    ["133398613783505"]=true,["87259391926321"]=true,  -- c00lkidd Punch
+    ["88451353906104"]=true,                            -- Nosferatu Slash
+    ["135853087227453"]=true,                           -- Guest 666 Slash
+}
+
+local combatAnimBlockConn = nil
+
+-- FIXED: combatSetupAnimBlock now uses Heartbeat instead of RenderStepped
+local function combatSetupAnimBlock()
+    if combatAnimBlockConn then 
+        combatAnimBlockConn:Disconnect() 
+        combatAnimBlockConn = nil 
+    end
+    if not combatS.autoBlockOn then return end
+    if combatS.autoBlockMode ~= "Animations" then return end
+
+    combatAnimBlockConn = svc.Run.Heartbeat:Connect(function()
+        if not combatS.autoBlockOn then return end
+        if combatS.autoBlockMode ~= "Animations" then return end
+        
+        local myRoot = combatCachedHRP
+        if not myRoot then return end
+        
+        local kf = combatGetKillersFolder()
+        if not kf then return end
+
+        for _, killer in ipairs(kf:GetChildren()) do
+            local khrp = killer:FindFirstChild("HumanoidRootPart")
+            local khum = killer:FindFirstChildOfClass("Humanoid")
+            if not khrp or not khum then continue end
+            
+            local dist = (khrp.Position - myRoot.Position).Magnitude
+            -- FIX: Use exact detection range, NO extra
+            if dist > combatS.detectionRange then continue end
+            
+            if not combatIsFacing(myRoot, khrp, killer.Name) then continue end
+
+            local anim = khum:FindFirstChildOfClass("Animator")
+            if not anim then continue end
+            
+            local ok, tracks = pcall(function() return anim:GetPlayingAnimationTracks() end)
+            if not ok then continue end
+
+            for _, track in ipairs(tracks) do
+                local animId
+                pcall(function()
+                    animId = tostring(track.Animation and track.Animation.AnimationId or ""):match("%d+")
+                end)
+                if animId and TRIGGER_ANIMS[animId] then
+                    local now = tick()
+                    if now - combatLastBlockTime >= BLOCK_CD then
+                        combatLastBlockTime = now
+                        local doFire = function()
+                            if combatS.blockType == "Block" then
+                                combatFireAbility("Block")
+                                if combatS.doubleBlock then combatFireAbility("Punch") end
+                            elseif combatS.blockType == "Charge" then
+                                combatFireAbility("Charge")
+                            elseif combatS.blockType == "7n7 Clone" then
+                                combatFireAbility("Clone")
+                            end
+                        end
+                        if combatS.blockDelay > 0 then 
+                            task.delay(combatS.blockDelay, doFire) 
+                        else 
+                            doFire() 
+                        end
+                    end
+                    break
+                end
+            end
+        end
+    end)
+end
+
+-- FIX: combatGetDynamicRadius NOW RETURNS EXACT RANGE (NO PING EXTRA)
 local function combatGetDynamicRadius()
-    local ok, ping = pcall(function() return lp:GetNetworkPing() * 1000 end)
-    if not ok then return combatS.detectionRange end
-    if ping < 60  then return combatS.detectionRange
-    elseif ping < 120 then return combatS.detectionRange + 5
-    else return combatS.detectionRange + 10 end
+    return combatS.detectionRange  -- EXACT range, no ping-based +3/+5/+10
 end
 
--- Core block trigger (shared by both ChildAdded and Heartbeat paths)
 local function combatTryBlockFromHitbox(hb)
     if not combatS.autoBlockOn then return end
+    if combatS.autoBlockMode ~= "Hitbox" then return end
     if not hb or not hb:IsA("BasePart") then return end
 
-    -- Size filter: only react to hitboxes matching the attack hitbox size
     local sz = hb.Size
     if math.abs(sz.X - combatS.hbTargetSize.X) > combatS.hbMargin
     or math.abs(sz.Y - combatS.hbTargetSize.Y) > combatS.hbMargin
     or math.abs(sz.Z - combatS.hbTargetSize.Z) > combatS.hbMargin then return end
 
+    local kf = combatGetKillersFolder()
+    if not kf then return end
+
+    local creatorName = nil
+    creatorName = hb:GetAttribute("Creator")
+        or hb:GetAttribute("creator")
+        or hb:GetAttribute("Owner")
+        or hb:GetAttribute("owner")
+    if not creatorName then
+        local sv = hb:FindFirstChild("Creator") or hb:FindFirstChild("creator")
+                or hb:FindFirstChild("Owner")   or hb:FindFirstChild("owner")
+        if sv and sv:IsA("StringValue") then
+            creatorName = sv.Value
+        end
+    end
+
+    local killerModel = nil
+    if creatorName then
+        killerModel = kf:FindFirstChild(tostring(creatorName))
+    else
+        for _, km in ipairs(kf:GetChildren()) do
+            if hb.Name == km.Name or hb.Name:sub(1, #km.Name) == km.Name then
+                killerModel = km; break
+            end
+        end
+    end
+
+    if not killerModel then return end
+
     local myRoot = combatCachedHRP; if not myRoot then return end
     local dist = (hb.Position - myRoot.Position).Magnitude
-    if dist > combatGetDynamicRadius() then return end
+    -- FIX: Use exact detection range, NO extra from ping
+    if dist > combatS.detectionRange then return end
 
-    -- Killer facing + anti-bait checks (reuse existing combat helpers)
-    local killerModel = combatGetNearestKiller()
-    local hrp = killerModel and killerModel:FindFirstChild("HumanoidRootPart")
-    if hrp then
-        if not combatIsFacing(myRoot, hrp, killerModel.Name) then return end
-        if combatS.antiBait then
-            local vel = Vector3.zero
-            pcall(function() vel = hrp.AssemblyLinearVelocity end)
-            if vel.Magnitude < 0.1 then pcall(function() vel = hrp.Velocity end) end
-            local toUs = myRoot.Position - hrp.Position
-            if toUs.Magnitude > 0.1 and vel:Dot(toUs.Unit) < -3 then return end
-            if dist > 13 then return end
-            if dist > 6 then
-                local sideSpeed = math.abs(vel:Dot(hrp.CFrame.RightVector))
-                if sideSpeed > 6 and vel:Dot(toUs.Unit) < 0 then return end
-            end
+    local hrp = killerModel:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+    if not combatIsFacing(myRoot, hrp, killerModel.Name) then return end
+    if combatS.antiBait then
+        local vel = Vector3.zero
+        pcall(function() vel = hrp.AssemblyLinearVelocity end)
+        if vel.Magnitude < 0.1 then pcall(function() vel = hrp.Velocity end) end
+        local toUs = myRoot.Position - hrp.Position
+        if toUs.Magnitude > 0.1 and vel:Dot(toUs.Unit) < -3 then return end
+        if dist > 13 then return end
+        if dist > 6 then
+            local sideSpeed = math.abs(vel:Dot(hrp.CFrame.RightVector))
+            if sideSpeed > 6 and vel:Dot(toUs.Unit) < 0 then return end
         end
     end
 
@@ -3275,32 +3778,35 @@ local function combatTryBlockFromHitbox(hb)
     end
 end
 
--- Hitbox watcher: replaces sound hooks with hitbox folder monitoring
+-- Hitbox watcher
 local combatHBChildConn    = nil
 local combatHBHeartbeatConn = nil
 
-combatSetupSoundWatcher = function()  -- name kept so all existing call sites work
+-- FIXED: heartbeat loop uses EXACT detection range
+combatSetupSoundWatcher = function()
     task.spawn(function()
+        -- Initialize sound hooks first
+        combatSetupSoundHooks()
+        
         local folder = svc.WS:WaitForChild("Hitboxes", 10)
         if not folder then return end
 
-        -- Scan any hitboxes that already exist
         for _, hb in ipairs(folder:GetChildren()) do
             task.spawn(combatTryBlockFromHitbox, hb)
         end
 
-        -- ChildAdded: fires the moment a new hitbox is replicated
         if combatHBChildConn then combatHBChildConn:Disconnect() end
         combatHBChildConn = folder.ChildAdded:Connect(function(hb)
             combatTryBlockFromHitbox(hb)
         end)
 
-        -- Heartbeat: catches hitboxes ChildAdded might schedule late
         if combatHBHeartbeatConn then combatHBHeartbeatConn:Disconnect() end
         combatHBHeartbeatConn = svc.Run.Heartbeat:Connect(function()
             if not combatS.autoBlockOn then return end
+            if combatS.autoBlockMode ~= "Hitbox" then return end
             local myRoot = combatCachedHRP; if not myRoot then return end
-            local radius = combatGetDynamicRadius()
+            -- FIX: Use EXACT detection range, NO extra
+            local radius = combatS.detectionRange
             for _, hb in ipairs(folder:GetChildren()) do
                 if hb:IsA("BasePart") then
                     local sz = hb.Size
@@ -3336,11 +3842,9 @@ combatSetupSoundWatcher = function()  -- name kept so all existing call sites wo
     end)
 end
 
--- HDT (Hitbox Dragging Tech) - activates on block animation
--- Drag logic from lovesakens (BodyVelocity + doPattern), BLOCK_ANIMS IDs kept
+-- HDT
 local combatHDTLastTime = 0
 local HDT_CD = 0.5
-local _combatHDTDebounce = false
 local combatHDTDragging = false
 local HDT_ANIM_ID = "rbxassetid://136252471123500"
 local combatAimActive = false
@@ -3422,7 +3926,7 @@ local function combatHDTBeginDrag(killerModel)
         bv.Velocity = h2.Magnitude > 0.01 and h2.Unit * combatS.hdtMoveSpeed or Vector3.zero
         if to.Magnitude <= 2.0 then combatHDTDragging = false end
     end)
-    task.delay(0.4, function() combatHDTDragging = false; combatStopAim() end)
+    task.delay(combatS.hdtDuration, function() combatHDTDragging = false; combatStopAim() end)
 end
 
 local function combatOnBlockAnim(track)
@@ -3430,7 +3934,6 @@ local function combatOnBlockAnim(track)
         local id = tostring(track.Animation and track.Animation.AnimationId or ""):match("%d+")
         if not id or not BLOCK_ANIMS[id] then return end
 
-        -- HDT
         if combatS.hdtEnabled and not combatHDTDragging then
             local now = tick(); if now - combatHDTLastTime >= HDT_CD then
                 combatHDTLastTime = now
@@ -3443,7 +3946,6 @@ local function combatOnBlockAnim(track)
             end
         end
 
-        -- Auto Punch: fires after block duration (0.1s) so block registers first
         if combatS.autoPunchOn then
             task.delay(0.12, function()
                 combatFireAbility("Punch")
@@ -3477,7 +3979,6 @@ local function combatUpdateCircles()
             end
         end
     end
-    -- Cleanup
     for k, c in pairs(combatCircles) do
         if not k.Parent or not k:FindFirstChild("HumanoidRootPart") then
             pcall(function() c:Destroy() end); combatCircles[k]=nil
@@ -3485,7 +3986,7 @@ local function combatUpdateCircles()
     end
 end
 
--- Facing Visual (floor circle under killer)
+-- Facing Visual
 local combatFacingVisuals = {}
 local function combatUpdateFacing()
     local kf = combatGetKillersFolder(); if not kf then return end
@@ -3534,7 +4035,6 @@ end
 local combatVisualTickConn = nil
 
 combatStartLoops = function()
-    -- Visual tick (throttled to every 10 frames, only runs if features are active)
     if combatVisualTickConn then combatVisualTickConn:Disconnect() end
     local _visualThrottle = 0
     combatVisualTickConn = svc.Run.Heartbeat:Connect(function()
@@ -3547,18 +4047,16 @@ combatStartLoops = function()
 end
 
 combatStopLoops = function()
-    -- Disconnect hitbox watchers
     if combatHBChildConn then combatHBChildConn:Disconnect(); combatHBChildConn = nil end
     if combatHBHeartbeatConn then combatHBHeartbeatConn:Disconnect(); combatHBHeartbeatConn = nil end
     if combatVisualTickConn then combatVisualTickConn:Disconnect(); combatVisualTickConn = nil end
-    -- Cleanup visuals
     for k, c in pairs(combatCircles) do pcall(function() c:Destroy() end) end
     for k, v in pairs(combatFacingVisuals) do pcall(function() v:Destroy() end) end
     combatCircles = {}
     combatFacingVisuals = {}
 end
 
--- Animator hook for HDT
+-- Animator hook
 local function combatRefreshAnimator()
     local c = lp.Character; if not c then _cachedAnimator = nil; return end
     local h = c:FindFirstChildOfClass("Humanoid")
@@ -3573,7 +4071,10 @@ lp.CharacterAdded:Connect(function(char)
     task.wait(0.6)
     combatRefreshAnimator()
     combatSetupAimPunch(char)
-    if combatS.autoBlockOn then combatSetupSoundWatcher() end
+    if combatS.autoBlockOn then 
+        combatSetupSoundWatcher() 
+        combatSetupAnimBlock()
+    end
     if combatS.autoBlockOn or combatS.killerCircles or combatS.facingVisual then
         combatStartLoops()
     end
@@ -3584,82 +4085,88 @@ if lp.Character then
         task.wait(1)
         combatRefreshAnimator()
         combatSetupAimPunch(lp.Character)
-        if combatS.autoBlockOn then combatSetupSoundWatcher() end
+        if combatS.autoBlockOn then 
+            combatSetupSoundWatcher()
+            combatSetupAnimBlock()
+        end
         if combatS.autoBlockOn or combatS.killerCircles or combatS.facingVisual then
             combatStartLoops()
         end
     end)
 end
 
--- Auto Punch fires from combatOnBlockAnim after a successful block (0.1s delay)
-
 -- UI Elements
-sec_015:Toggle({ Title = "Auto Block (Hitbox)", Flag = "combatAutoBlock", Default = combatS.autoBlockOn, Callback=function(on) 
-        combatS.autoBlockOn=on
-        if on then combatSetupSoundWatcher(); combatStartLoops()
-        else combatStopLoops() end
-    end, Type = "Checkbox"})
-
-sec_015:Dropdown({ Title = "Block Type", Flag = "combatBlockType", Values = {"Block","Charge","7n7 Clone"}, Default = combatS.blockType, Callback=function(v) combatS.blockType=v end 
+-- MAIN AUTO BLOCK TOGGLE AT THE TOP
+sec_015:Toggle({ 
+    Title = "🔒 Enable Auto Block", 
+    Flag = "combatAutoBlockMain", 
+    Default = combatS.autoBlockOn, 
+    Callback = function(on)
+        combatS.autoBlockOn = on
+        if on then 
+            combatSetupSoundWatcher() 
+            combatSetupAnimBlock()
+            combatStartLoops()
+        else 
+            combatStopLoops()
+        end
+    end, 
+    Type = "Checkbox"
 })
 
-sec_015:Slider({ Title = "Detection Range", Flag = "combatDetRange", Value = {Min=5,Max=50,Default=combatS.detectionRange}, Step = 1, Callback=function(v) combatS.detectionRange=v end 
+-- Auto Block Mode Dropdown (Hitbox, Sounds, Animations)
+sec_015:Dropdown({ 
+    Title = "Auto Block Mode", 
+    Flag = "combatAutoBlockMode", 
+    Values = {"Hitbox", "Sounds", "Animations"}, 
+    Default = combatS.autoBlockMode, 
+    Callback = function(v) 
+        combatS.autoBlockMode = v
+        if combatS.autoBlockOn then
+            combatSetupSoundWatcher()
+            combatSetupAnimBlock()
+        end
+    end 
 })
 
-sec_015:Slider({ Title = "Hitbox Size X", Flag = "combatHBSizeX", Value = {Min=1,Max=20,Default=combatS.hbTargetSize.X}, Step = 0.25, Callback=function(v) combatS.hbTargetSize=Vector3.new(v,combatS.hbTargetSize.Y,combatS.hbTargetSize.Z) end
-})
+sec_015:Dropdown({ Title = "Block Type", Flag = "combatBlockType", Values = {"Block","Charge","7n7 Clone"}, Default = combatS.blockType, Callback=function(v) combatS.blockType=v end })
 
-sec_015:Slider({ Title = "Hitbox Size Y", Flag = "combatHBSizeY", Value = {Min=1,Max=20,Default=combatS.hbTargetSize.Y}, Step = 0.25, Callback=function(v) combatS.hbTargetSize=Vector3.new(combatS.hbTargetSize.X,v,combatS.hbTargetSize.Z) end
-})
+sec_015:Slider({ Title = "Detection Range", Flag = "combatDetRange", Value = {Min=5,Max=50,Default=combatS.detectionRange}, Step = 1, Callback=function(v) combatS.detectionRange=v end })
 
-sec_015:Slider({ Title = "Hitbox Size Z", Flag = "combatHBSizeZ", Value = {Min=1,Max=20,Default=combatS.hbTargetSize.Z}, Step = 0.25, Callback=function(v) combatS.hbTargetSize=Vector3.new(combatS.hbTargetSize.X,combatS.hbTargetSize.Y,v) end
-})
+sec_015:Slider({ Title = "Hitbox Size X", Flag = "combatHBSizeX", Value = {Min=1,Max=20,Default=combatS.hbTargetSize.X}, Step = 0.25, Callback=function(v) combatS.hbTargetSize=Vector3.new(v,combatS.hbTargetSize.Y,combatS.hbTargetSize.Z) end })
 
+sec_015:Slider({ Title = "Hitbox Size Y", Flag = "combatHBSizeY", Value = {Min=1,Max=20,Default=combatS.hbTargetSize.Y}, Step = 0.25, Callback=function(v) combatS.hbTargetSize=Vector3.new(combatS.hbTargetSize.X,v,combatS.hbTargetSize.Z) end })
 
+sec_015:Slider({ Title = "Hitbox Size Z", Flag = "combatHBSizeZ", Value = {Min=1,Max=20,Default=combatS.hbTargetSize.Z}, Step = 0.25, Callback=function(v) combatS.hbTargetSize=Vector3.new(combatS.hbTargetSize.X,combatS.hbTargetSize.Y,v) end })
 
-sec_015:Slider({ Title = "Block Delay (s)", Flag = "combatBlockDelay", Value = {Min=0,Max=0.5,Default=combatS.blockDelay}, Step = 0.01, Callback=function(v) combatS.blockDelay=v end 
-})
+sec_015:Slider({ Title = "Block Delay (s)", Flag = "combatBlockDelay", Value = {Min=0,Max=0.5,Default=combatS.blockDelay}, Step = 0.01, Callback=function(v) combatS.blockDelay=v end })
 
 sec_015:Toggle({ Title = "Double Block Tech", Flag = "combatDoubleBlock", Default = combatS.doubleBlock, Callback=function(on) combatS.doubleBlock=on end, Type = "Checkbox"})
 
 sec_015:Toggle({ Title = "Anti-Bait", Flag = "combatAntiBait", Default = combatS.antiBait, Callback=function(on) combatS.antiBait=on end, Type = "Checkbox"})
 
-sec_015:Slider({ Title = "Block Miss Chance %", Flag = "combatMissChance", Value = {Min=0,Max=100,Default=combatS.abMissChance}, Step = 1, Callback=function(v) combatS.abMissChance=v end 
-})
+sec_015:Slider({ Title = "Block Miss Chance %", Flag = "combatMissChance", Value = {Min=0,Max=100,Default=combatS.abMissChance}, Step = 1, Callback=function(v) combatS.abMissChance=v end })
 
 local sec_016 = tabGuest1337:Section({ Title = "Auto Punch", Opened = true })
-
 sec_016:Toggle({ Title = "Auto Punch", Flag = "combatAutoPunch", Default = combatS.autoPunchOn, Callback=function(on) combatS.autoPunchOn=on end, Type = "Checkbox"})
 
 local sec_017 = tabGuest1337:Section({ Title = "HDT (Hitbox Dragging)", Opened = true })
-
-
 sec_017:Toggle({ Title = "Enable HDT", Flag = "combatHDT", Default = combatS.hdtEnabled, Callback=function(on) combatS.hdtEnabled=on end, Type = "Checkbox"})
-
-sec_017:Slider({ Title = "Sprint Speed", Flag = "combatHDTMoveSpeed", Value = {Min=1,Max=100,Default=combatS.hdtMoveSpeed}, Step = 1, Callback=function(v) combatS.hdtMoveSpeed=v end
-})
-
-sec_017:Slider({ Title = "Drag Duration (s)", Flag = "combatHDTDur", Value = {Min=0.1,Max=3.0,Default=combatS.hdtDuration}, Step = 0.1, Callback=function(v) combatS.hdtDuration=v end
-})
-
-sec_017:Slider({ Title = "HDT Miss Chance %", Flag = "combatHDTMiss", Value = {Min=0,Max=100,Default=combatS.hdtMissChance}, Step = 1, Callback=function(v) combatS.hdtMissChance=v end
-})
+sec_017:Slider({ Title = "Sprint Speed", Flag = "combatHDTMoveSpeed", Value = {Min=1,Max=100,Default=combatS.hdtMoveSpeed}, Step = 1, Callback=function(v) combatS.hdtMoveSpeed=v end })
+sec_017:Slider({ Title = "Drag Duration (s)", Flag = "combatHDTDur", Value = {Min=0.1,Max=3.0,Default=combatS.hdtDuration}, Step = 0.1, Callback=function(v) combatS.hdtDuration=v end })
+sec_017:Slider({ Title = "HDT Miss Chance %", Flag = "combatHDTMiss", Value = {Min=0,Max=100,Default=combatS.hdtMissChance}, Step = 1, Callback=function(v) combatS.hdtMissChance=v end })
 
 local sec_018 = tabGuest1337:Section({ Title = "Vision", Opened = true })
-
 sec_018:Toggle({ Title = "Detection Circles", Flag = "combatCircles", Default = combatS.killerCircles, Callback=function(on) 
         combatS.killerCircles=on
         if on then combatStartLoops() else combatUpdateCircles() end
     end, Type = "Checkbox"})
-
 sec_018:Toggle({ Title = "Facing Check", Flag = "combatFacingCheck", Default = combatS.facingCheck, Callback=function(on) combatS.facingCheck=on end, Type = "Checkbox"})
-
 sec_018:Toggle({ Title = "Facing Visual", Flag = "combatFacingVis", Default = combatS.facingVisual, Callback=function(on)
         combatS.facingVisual=on
         if on then combatStartLoops()
         else combatUpdateFacing() end
     end, Type = "Checkbox"})
-
 sec_018:Slider({ Title = "Facing Visual Size", Flag = "combatFacingSize", Value = {Min=1,Max=10,Default=combatS.facingVisRadius}, Step = 0.5, Callback=function(v)
         combatS.facingVisRadius=v
         for _, vis in pairs(combatFacingVisuals) do
@@ -3671,31 +4178,27 @@ sec_018:Slider({ Title = "Facing Visual Size", Flag = "combatFacingSize", Value 
                 end
             end
         end
-    end
-})
+    end })
 
 local sec_019 = tabGuest1337:Section({ Title = "Aim Punch Lock", Opened = true })
-
 sec_019:Toggle({ Title = "Aim Punch", Flag = "combatAimPunch", Default = combatS.aimPunchActive,
     Callback = function(on)
         combatS.aimPunchActive = on
         if on and lp.Character then combatSetupAimPunch(lp.Character) end
         if not on and combatAimConnection then combatAimConnection:Disconnect(); combatAimConnection = nil end
     end, Type = "Checkbox"})
-
 sec_019:Slider({ Title = "Punch Prediction", Flag = "combatPunchPred", Step = 0.1,
     Value = { Min = 0, Max = 10, Default = combatS.punchPrediction },
     Callback = function(v) combatS.punchPrediction = v end })
-
 sec_019:Slider({ Title = "Aim Duration (s)", Flag = "combatAimDur", Step = 0.05,
     Value = { Min = 0.1, Max = 2.0, Default = combatS.aimPunchDuration },
     Callback = function(v) combatS.aimPunchDuration = v end })
+end) -- END OF GUEST 1337 PCALL
 
--- End of Guest1337 Combat Section
 
-------------------------------------------------------------------------
+-- =========================================================================
 -- TAB: TWO-TIME (Dagger / Flank)
-------------------------------------------------------------------------
+-- =========================================================================
 pcall(function()
 local Event = svc.RS.Modules.Network.Network.RemoteEvent
 local ttS = {
@@ -3888,11 +4391,10 @@ local function ttFlipToKillerBack(killerModel)
     end)
 end
 
--- Hook crouch via Remote listener (detects UseActorAbility + Crouch buffer)
+-- Hook crouch via Remote listener
 local function hookCrouch()
     Event.OnClientEvent:Connect(function(eventName, data)
         if eventName ~= "UseActorAbility" then return end
-        -- verify it's the crouch buffer
         if type(data) == "table" then
             local buf = data[1]
             if typeof(buf) == "buffer" then
@@ -3940,10 +4442,8 @@ end })
 -- Config Share Section
 ------------------------------------------------------------------------
 pcall(function()
-
 local secConfigShare = tabInterface:Section({ Title = "Config Share", Opened = true })
 
--- Copy Config: reads the saved JSON file and base64 encodes it
 local CONFIG_PATH = "WindUI/hutao [forsaken]/config/hutao-forsaken.json"
 local B64CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 
@@ -3994,7 +4494,6 @@ secConfigShare:Button({
     end
 })
 
--- Load Config: paste the hutao: string, it writes the JSON back and reloads
 local loadConfigStr = ""
 secConfigShare:Input({
     Title = "Paste Config String",
@@ -4027,140 +4526,123 @@ secConfigShare:Button({
 })
 
 ------------------------------------------------------------------------
-------------------------------------------------------------------------
 -- TAB: CREDITS
 ------------------------------------------------------------------------
-------------------------------------------------------------------------
 local tabCredits = win:Tab({ Title = "Credits", Icon = "heart", IconColor = Color3.fromHex("#E8194B"), ShowTabTitle = false })
-
 local secCredits = tabCredits:Section({ Title = "hutao [forsaken] — Credits", Opened = true })
-
 secCredits:Paragraph({
     Title = "GUI Structure",
     Desc  = GradientText("Storm", Color3.fromHex("#7DD3FC"), Color3.fromHex("#9D4EDD"))
         .. "\nResponsible for the overall WindUI layout, tab structure, and visual organization of the script.",
 })
-
 secCredits:Paragraph({
     Title = "Maker / Scripter",
     Desc  = GradientText("mitsuki", Color3.fromHex("#E8194B"), Colors.Gold)
         .. "\nCore script logic, feature implementation, maintenance, and everything that makes it work.",
 })
-
 secCredits:Paragraph({
     Title = "Special Thanks",
     Desc  = "WindUI by Footagesus · hutao [forsaken] V1.0.9",
 })
-
 local secOldDevs = tabCredits:Section({ Title = "Old Devs - Special Thanks", Opened = true })
-
 secOldDevs:Paragraph({
     Title = "Special Thanks",
     Desc  = "Special thanks to glov/v1pr for the script.",
 })
-
 end) -- end Config Share + Credits pcall
 
 print("TEST 2")
-print("SAKIWARE ready")
+print("Hutao ready")
 
--- DEBUG: check if filesystem functions are available
-print("[SAKI-CFG] writefile:", writefile ~= nil)
-print("[SAKI-CFG] readfile: ", readfile  ~= nil)
-print("[SAKI-CFG] isfile:   ", isfile    ~= nil)
+print("[HUTAO-CFG] writefile:", writefile ~= nil)
+print("[HUTAO-CFG] readfile: ", readfile  ~= nil)
+print("[HUTAO-CFG] isfile:   ", isfile    ~= nil)
 
--- wait for all elements to finish initializing before loading saved values
+-- FIX: Check if win.Flags exists before accessing it
 task.spawn(function()
-    task.wait(1.5) -- increased from 0.5 to give WindUI more time to register elements
+    task.wait(1.5)
 
-    print("[SAKI-CFG] Attempting Load()...")
-    local loadOk, loadErr = pcall(function() sakiConfig:Load() end)
-    if loadOk then
-        print("[SAKI-CFG] Load() succeeded")
-    else
-        print("[SAKI-CFG] Load() FAILED:", tostring(loadErr))
-    end
+    pcall(function() sakiConfig:Load() end)
 
-    -- sync Lua variables FROM win.Flags AFTER load
-    -- WindUI restores the UI state but may not fire callbacks, so we read flags directly
     task.defer(function()
-        print("[SAKI-CFG] Syncing flags and starting saved features...")
+        print("[HUTAO-CFG] Syncing flags...")
 
-        -- Stamina
-        stam.on      = win.Flags.stamOn      or false
-        stam.noLoss  = win.Flags.stamNoLoss  or false
-        stam.loss    = win.Flags.stamLoss    or stam.loss
-        stam.gain    = win.Flags.stamGain    or stam.gain
-        stam.max     = win.Flags.stamMax     or stam.max
-        stam.current = win.Flags.stamCurrent or stam.current
-        print("[SAKI-CFG] stam.on =", stam.on, "| stam.noLoss =", stam.noLoss)
-        if stam.on or stam.noLoss then stamStart() end
-        if stam.noLoss then stamApply() end
+        -- SAFE FLAG ACCESS - check if win.Flags exists
+        if win and win.Flags then
+            -- Stamina
+            stam.on = win.Flags.stamOn or false
+            stam.noLoss = win.Flags.stamNoLoss or false
+            if type(win.Flags.stamLoss) == "number" then stam.loss = win.Flags.stamLoss end
+            if type(win.Flags.stamGain) == "number" then stam.gain = win.Flags.stamGain end
+            if type(win.Flags.stamMax) == "number" then stam.max = win.Flags.stamMax end
+            if type(win.Flags.stamCurrent) == "number" then stam.current = win.Flags.stamCurrent end
 
-        -- Speed Hack
-        speedHack.on = win.Flags.speedOn or false
-        print("[SAKI-CFG] speedHack.on =", speedHack.on)
-        if speedHack.on then speedStart() end
+            if stam.on or stam.noLoss then stamStart() end
+            if stam.noLoss then stamApply() end
 
-        -- Anti-Backstab
-        abs.on = win.Flags.absOn or false
-        print("[SAKI-CFG] abs.on =", abs.on)
-        if abs.on then absStart() end
+            -- Speed Hack
+            speedHack.on = win.Flags.speedOn or false
+            if speedHack.on then speedStart() end
 
-        -- Auto Solve (flow)
-        flow.on = win.Flags.flowOn or false
-        print("[SAKI-CFG] flow.on =", flow.on)
-        -- flow checks its flag each tick, no explicit start needed
+            -- Anti-Backstab
+            abs.on = win.Flags.absOn or false
+            if abs.on then absStart() end
 
-        -- ESP
-        esp.killers    = win.Flags.espKillers    or false
-        esp.survivors  = win.Flags.espSurvivors  or false
-        esp.generators = win.Flags.espGenerators or false
-        esp.items      = win.Flags.espItems      or false
-        esp.buildings  = win.Flags.espBuildings  or false
-        print("[SAKI-CFG] esp: killers =", esp.killers, "| survivors =", esp.survivors, "| generators =", esp.generators, "| items =", esp.items, "| buildings =", esp.buildings)
-        if esp.killers    then task.spawn(function() espDoKillers(true)    end) end
-        if esp.survivors  then task.spawn(function() espDoSurvivors(true)  end) end
-        if esp.generators then task.spawn(function() espDoGenerators(true) end) end
-        if esp.items      then task.spawn(function() espDoItems(true)      end) end
-        if esp.buildings  then task.spawn(function() espDoBuildings(true)  end) end
+            -- Auto Solve (flow)
+            flow.on = win.Flags.flowOn or false
 
-        -- Minion ESP (mset)
-        mset.pizza  = win.Flags.espPizza  or false
-        mset.zombie = win.Flags.espZombie or false
-        mset.puddle = win.Flags.espPuddle or false
-        print("[SAKI-CFG] mset: pizza =", mset.pizza, "| zombie =", mset.zombie, "| puddle =", mset.puddle)
-        if mset.pizza  then task.spawn(scanPizza)   end
-        if mset.zombie then task.spawn(scanZombie)  end
-        if mset.puddle then task.spawn(scanPuddles) end
+            -- ESP
+            ESP_CONFIG.Killers = win.Flags.espKillers or false
+            ESP_CONFIG.Survivors = win.Flags.espSurvivors or false
+            ESP_CONFIG.Generators = win.Flags.espGenerators or false
+            ESP_CONFIG.Items = win.Flags.espItems or false
+            ESP_CONFIG.Buildings = win.Flags.espBuildings or false
+            if ESP_CONFIG.Killers or ESP_CONFIG.Survivors or ESP_CONFIG.Generators or ESP_CONFIG.Items or ESP_CONFIG.Buildings then
+                pcall(ScanAll)
+            end
 
-        -- Music
-        music.on = win.Flags.musicOn or false
-        print("[SAKI-CFG] music.on =", music.on)
-        if music.on then music.thread = task.spawn(musicMonitor) end
+            -- Minion ESP
+            mset.pizza  = win.Flags.espPizza  or false
+            mset.zombie = win.Flags.espZombie or false
+            mset.puddle = win.Flags.espPuddle or false
+            if mset.pizza  then task.spawn(scanPizza)   end
+            if mset.zombie then task.spawn(scanZombie)  end
+            if mset.puddle then task.spawn(scanPuddles) end
 
-        -- Chat Logger
-        chatLogEnabled = win.Flags.chatLogEnabled or false
-        print("[SAKI-CFG] chatLogEnabled =", chatLogEnabled)
-        if chatLogEnabled then ChatLogger.setup() end
+            -- Music
+            music.on = win.Flags.musicOn or false
+            if music.on then music.thread = task.spawn(musicMonitor) end
 
-        print("[SAKI-CFG] Feature restore complete.")
+            -- Chat Logger
+            chatLogEnabled = win.Flags.chatLogEnabled or false
+            if chatLogEnabled then ChatLogger.setup() end
+
+            -- Auto Block Main Toggle (Guest 1337)
+            combatS.autoBlockOn = win.Flags.combatAutoBlockMain or false
+            if combatS.autoBlockOn then
+                combatSetupSoundWatcher()
+                combatSetupAnimBlock()
+                combatStartLoops()
+            end
+
+            print("[HUTAO-CFG] Feature restore complete.")
+        else
+            print("[HUTAO-CFG] win.Flags not yet available, skipping initial load")
+        end
     end)
 end)
 
--- auto-save: runs every 2s
+-- auto-save
 task.spawn(function()
     while true do
         task.wait(2)
-        local saveOk, saveErr = pcall(function() sakiConfig:Save() end)
-        if not saveOk then
-            print("[SAKI-CFG] Save() FAILED:", tostring(saveErr))
-        end
+        pcall(function() sakiConfig:Save() end)
     end
 end)
 
-end)
+end) -- Close global pcall
+
 if not _ok then
-    warn("[SAKIWARE ERROR]", tostring(_err))
-    print("[SAKIWARE ERROR]", tostring(_err))
-end
+    warn("[HUTAO ERROR]", tostring(_err))
+    print("[HUTAO ERROR]", tostring(_err))
+end 
