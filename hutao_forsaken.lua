@@ -1417,6 +1417,10 @@ end
 -- SCAN FUNCTIONS - UPDATED WITH CLEAN SCAN
 -- ============================================================================
 
+-- ============================================================================
+-- SCAN FUNCTIONS - UPDATED WITH CLEAN SCAN (FIXED - NO GOTO)
+-- ============================================================================
+
 local function ScanAll()
     if not win or not win.Flags then return end
     if not (win.Flags.espSurv or win.Flags.espKiller or win.Flags.espGens or win.Flags.espHatch or win.Flags.espGates) then
@@ -1466,36 +1470,30 @@ local function ScanAll()
         if chars then
             for _, char in ipairs(chars:GetChildren()) do
                 if char:IsA("Model") then
-                    -- CRITICAL FIX: If the model is named "BodyParts", it's a sub-assembly!
-                    -- We skip tagging it to avoid visual clutter on the screen.
-                    if char.Name == "BodyParts" or char:FindFirstChild("BodyParts") then
-                        -- Check if this is a survivor/killer group container instead of raw parts
-                        goto continue
-                    end
-
-                    -- Determine if it's a Killer or Survivor based on game indicators
-                    local isKiller = char:GetAttribute("Killer") or char:FindFirstChild("Knife") or false
-                    
-                    if isKiller and win.Flags.espKiller then
-                        if not EngineState.Pool[char] then
-                            AddESP(char, "Killer", ESP_CONFIG.KillerColor, true)
-                        end
-                    elseif not isKiller and win.Flags.espSurv then
-                        if not EngineState.Pool[char] then
-                            -- Give it a clean name instead of showing internal rig names
-                            if char.Name:lower() == "model" or char.Name == "" then
-                                char.Name = "Survivor"
+                    -- Skip if this is a BodyParts model (visual clutter)
+                    if char.Name ~= "BodyParts" and not char:FindFirstChild("BodyParts") then
+                        -- Determine if it's a Killer or Survivor based on game indicators
+                        local isKiller = char:GetAttribute("Killer") or char:FindFirstChild("Knife") or false
+                        
+                        if isKiller and win.Flags.espKiller then
+                            if not EngineState.Pool[char] then
+                                AddESP(char, "Killer", ESP_CONFIG.KillerColor, true)
                             end
-                            AddESP(char, "Survivor", ESP_CONFIG.SurvivorColor, true)
+                        elseif not isKiller and win.Flags.espSurv then
+                            if not EngineState.Pool[char] then
+                                -- Give it a clean name instead of showing internal rig names
+                                if char.Name:lower() == "model" or char.Name == "" then
+                                    char.Name = "Survivor"
+                                end
+                                AddESP(char, "Survivor", ESP_CONFIG.SurvivorColor, true)
+                            end
                         end
                     end
                 end
-                ::continue::
             end
         end
     end
 end
-
 -- ============================================================================
 -- BACKGROUND SCAN THREAD
 -- ============================================================================
