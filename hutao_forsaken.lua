@@ -1,4 +1,4 @@
-Like this? -- Hutao [forsaken] V1.0.9
+-- Hutao [forsaken] V1.0.9
 print("Hutao [forsaken] V1.0.9 loaded")
 print("TEST 1")
 local _ok, _err = pcall(function()
@@ -1130,11 +1130,11 @@ secKillerAbilities:Toggle({ Title="Noli — Void Rush Control", Type="Checkbox",
 
 ------------------------------------------------------------------------
 ------------------------------------------------------------------------
--- TAB: VISUAL (ESP) - COMPLETELY REWORKED
+-- TAB: VISUAL (ESP) - RAYFIELD STYLE (FIXED)
 ------------------------------------------------------------------------
 ------------------------------------------------------------------------
 local tabVisual = win:Tab({ Title = "Visual", Icon = "eye", IconColor = Color3.fromHex("#7DD3FC"), ShowTabTitle = false })
-local secESP    = tabVisual:Section({ Title = "ESP", Opened = true })
+local secESP    = tabVisual:Section({ Title = "ESP (Rayfield Style)", Opened = true })
 
 -- ============================================================================
 -- ESP CONFIG
@@ -1149,23 +1149,24 @@ local ESP_CONFIG = {
     Hatch       = false,
     Gates       = false,
     
-    KillerColor    = Color3.fromRGB(255, 0, 0),       -- Bright Red
-    SurvivorColor  = Color3.fromRGB(255, 215, 0),     -- Gold
-    GeneratorColor = Color3.fromRGB(255, 200, 50),    -- Yellow
-    ItemColor      = Color3.fromRGB(0, 200, 255),     -- Cyan
-    BuildingColor  = Color3.fromRGB(128, 0, 255),     -- Purple
-    HatchColor     = Color3.fromRGB(0, 255, 200),     -- Teal
-    GateColor      = Color3.fromRGB(255, 100, 255),   -- Pink
+    KillerColor    = Color3.fromRGB(100, 0, 0),
+    SurvivorColor  = Color3.fromRGB(255, 215, 0),
+    GeneratorColor = Color3.fromRGB(255, 200, 50),
+    ItemColor      = Color3.fromRGB(0, 200, 255),
+    BuildingColor  = Color3.fromRGB(128, 0, 255),
+    HatchColor     = Color3.fromRGB(0, 255, 200),
+    GateColor      = Color3.fromRGB(255, 100, 255),
     
     MaxDistance    = 2000,
 }
 
--- Track all ESP objects
-local espObjects = {}
-local espConnections = {}
+local EngineState = {
+    Pool = {},
+    Connections = {},
+}
 
 -- ============================================================================
--- HELPER FUNCTIONS
+-- COLOR HELPERS
 -- ============================================================================
 
 local function GetHealthColor(pct)
@@ -1177,199 +1178,196 @@ end
 
 local function GetItemColor(name)
     local lowered = name:lower()
-    if lowered:find("medkit") then return Color3.fromRGB(0, 200, 255) end
-    if lowered:find("bloxycola") then return Color3.fromRGB(255, 150, 0) end
+    if lowered:find("medkit") then
+        return Color3.fromRGB(0, 200, 255)
+    elseif lowered:find("bloxycola") then
+        return Color3.fromRGB(255, 150, 0)
+    end
     return Color3.fromRGB(0, 200, 255)
 end
 
 -- ============================================================================
--- REMOVE ESP FROM AN OBJECT
+-- CLEANUP FUNCTIONS
 -- ============================================================================
 
-local function RemoveESP(obj)
-    if not obj then return end
+local function RemoveESP(object)
+    if not object then return end
     
-    if espConnections[obj] then
-        for _, conn in ipairs(espConnections[obj]) do
-            pcall(function() conn:Disconnect() end)
+    if EngineState.Connections[object] then
+        for _, cx in ipairs(EngineState.Connections[object]) do
+            if cx then cx:Disconnect() end
         end
-        espConnections[obj] = nil
+        EngineState.Connections[object] = nil
     end
-    
-    if espObjects[obj] then
-        local data = espObjects[obj]
+
+    local cache = EngineState.Pool[object]
+    if cache then
         pcall(function()
-            if data.Highlight then data.Highlight:Destroy() end
-            if data.Billboard then data.Billboard:Destroy() end
+            if cache.Highlight then cache.Highlight:Destroy() end
+            if cache.Billboard then cache.Billboard:Destroy() end
         end)
-        espObjects[obj] = nil
+        EngineState.Pool[object] = nil
     end
 end
 
 -- ============================================================================
--- ADD ESP TO AN OBJECT
+-- ADD ESP FUNCTION
 -- ============================================================================
 
-local function AddESP(obj, tag, color, isChar)
-    if not obj or not obj.Parent then return end
-    if espObjects[obj] then return end
-    if not obj:IsA("Model") and not obj:IsA("BasePart") then return end
-    if obj == lp.Character then return end
+local function AddESP(object, tag, defaultColor, isCharacter)
+    if not object or not object.Parent then return end
+    if EngineState.Pool[object] then return end
     
-    -- Find a root part for billboard attachment
-    local root = obj
-    if obj:IsA("Model") then
-        root = obj:FindFirstChild("HumanoidRootPart") 
-            or obj:FindFirstChild("Torso") 
-            or obj.PrimaryPart
-            or obj:FindFirstChildWhichIsA("BasePart")
-    end
+    if not object:IsA("Model") then return end
+    if object == lp.Character then return end
+
+    local root = object:FindFirstChild("HumanoidRootPart")
+        or object.PrimaryPart
+        or object:FindFirstChildWhichIsA("BasePart")
+
     if not root then return end
-    
-    -- Create Highlight
-    local hl = Instance.new("Highlight")
-    hl.Name = "ESP_HL_" .. tag
-    hl.FillColor = color
-    hl.FillTransparency = 0.5
-    hl.OutlineColor = color
-    hl.OutlineTransparency = 0
-    hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-    hl.Adornee = obj
-    hl.Parent = obj
-    
-    -- Create Billboard
-    local bill = Instance.new("BillboardGui")
-    bill.Name = "ESP_BB_" .. tag
-    bill.Adornee = root
-    bill.Size = UDim2.new(0, 200, 0, 35)
-    bill.StudsOffset = Vector3.new(0, isChar and 4 or 3, 0)
-    bill.AlwaysOnTop = true
-    bill.MaxDistance = ESP_CONFIG.MaxDistance
-    bill.Parent = obj
-    
-    local label = Instance.new("TextLabel")
-    label.Size = UDim2.new(1, 0, 1, 0)
-    label.BackgroundTransparency = 1
-    label.TextColor3 = Color3.fromRGB(255, 255, 255)
-    label.TextStrokeTransparency = 0.3
-    label.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
-    label.TextSize = 14
-    label.Font = Enum.Font.GothamBold
-    label.Text = obj.Name or tag
-    label.Parent = bill
-    
+
+    EngineState.Connections[object] = {}
+
+    local bGui = Instance.new("BillboardGui")
+    bGui.Name = "ESP_" .. tag
+    bGui.Adornee = root
+    bGui.Size = UDim2.new(0, 200, 0, 40)
+    bGui.StudsOffset = Vector3.new(0, isCharacter and 3.5 or 2.5, 0)
+    bGui.AlwaysOnTop = true
+    bGui.MaxDistance = ESP_CONFIG.MaxDistance
+    bGui.Parent = object
+
+    local tLabel = Instance.new("TextLabel")
+    tLabel.Size = UDim2.new(1, 0, 1, 0)
+    tLabel.BackgroundTransparency = 1
+    tLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+    tLabel.TextStrokeTransparency = 0.3
+    tLabel.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+    tLabel.TextSize = 14
+    tLabel.Font = Enum.Font.GothamBold
+    tLabel.Text = object.Name
+    tLabel.Parent = bGui
+
     local data = {
-        Object = obj,
-        Root = root,
+        Object = object,
+        RootPart = root,
         Tag = tag,
-        Highlight = hl,
-        Billboard = bill,
-        Label = label,
-        BaseColor = color,
-        IsCharacter = isChar,
+        Billboard = bGui,
+        TextLabel = tLabel,
+        BaseColor = defaultColor,
+        IsCharacter = isCharacter,
+        HPPercent = 100,
+        Highlight = nil
     }
-    espObjects[obj] = data
-    espConnections[obj] = {}
-    
-    -- Health tracking for characters
-    if isChar then
-        local hum = obj:FindFirstChildOfClass("Humanoid")
+    EngineState.Pool[object] = data
+
+    if isCharacter then
+        local hum = object:FindFirstChildOfClass("Humanoid")
         if hum then
             local function UpdateHealth()
-                if not label or not label.Parent then return end
-                local pct = (hum.Health / math.max(hum.MaxHealth, 1)) * 100
-                local pctInt = math.floor(pct)
+                local mHp = math.max(hum.MaxHealth, 1)
+                local pct = (hum.Health / mHp) * 100
+                data.HPPercent = math.floor(pct + 0.5)
                 
-                if tag == "Killer" then
-                    label.Text = string.format("[KILLER] %s [%d%%]", obj.Name, pctInt)
-                    label.TextColor3 = ESP_CONFIG.KillerColor
+                if data.Tag == "Killer" then
+                    data.TextLabel.Text = string.format("[KILLER] %s [%d%%]", object.Name, data.HPPercent)
+                    data.TextLabel.TextColor3 = ESP_CONFIG.KillerColor
                 else
-                    label.Text = string.format("%s [%d%%]", obj.Name, pctInt)
-                    label.TextColor3 = GetHealthColor(pct)
+                    local healthColor = GetHealthColor(pct)
+                    data.TextLabel.Text = string.format("%s [%d%%]", object.Name, data.HPPercent)
+                    data.TextLabel.TextColor3 = healthColor
+                    data.BaseColor = ESP_CONFIG.SurvivorColor
                 end
                 
-                if hl then
-                    if tag == "Killer" then
-                        hl.FillColor = ESP_CONFIG.KillerColor
-                        hl.OutlineColor = ESP_CONFIG.KillerColor
+                if data.Highlight then
+                    if data.Tag == "Killer" then
+                        data.Highlight.FillColor = ESP_CONFIG.KillerColor
+                        data.Highlight.OutlineColor = ESP_CONFIG.KillerColor
                     else
-                        hl.FillColor = ESP_CONFIG.SurvivorColor
-                        hl.OutlineColor = ESP_CONFIG.SurvivorColor
+                        data.Highlight.FillColor = ESP_CONFIG.SurvivorColor
+                        data.Highlight.OutlineColor = ESP_CONFIG.SurvivorColor
                     end
                 end
             end
             UpdateHealth()
-            table.insert(espConnections[obj], hum.HealthChanged:Connect(UpdateHealth))
-        end
-    elseif tag == "Generator" then
-        local prog = obj:FindFirstChild("Progress")
-        if prog and prog:IsA("NumberValue") then
-            local function UpdateGen()
-                if not label or not label.Parent then return end
-                local completed = math.floor(prog.Value / 25)
-                label.Text = string.format("⚙️ Generator [%d/4]", completed)
-                label.TextColor3 = ESP_CONFIG.GeneratorColor
-            end
-            UpdateGen()
-            table.insert(espConnections[obj], prog.Changed:Connect(UpdateGen))
-        else
-            label.Text = "⚙️ Generator"
-            label.TextColor3 = ESP_CONFIG.GeneratorColor
+            table.insert(EngineState.Connections[object], hum.HealthChanged:Connect(UpdateHealth))
         end
     else
-        label.TextColor3 = color
+        if tag == "Generator" then
+            local progress = object:FindFirstChild("Progress")
+            if progress and progress:IsA("NumberValue") then
+                local function UpdateGenerator()
+                    local completed = math.floor(progress.Value / 25)
+                    data.TextLabel.Text = string.format("⚙️ Generator [%d/4]", completed)
+                end
+                UpdateGenerator()
+                table.insert(EngineState.Connections[object], progress.Changed:Connect(UpdateGenerator))
+            else
+                data.TextLabel.Text = "⚙️ Generator"
+            end
+            data.TextLabel.TextColor3 = ESP_CONFIG.GeneratorColor
+            data.BaseColor = ESP_CONFIG.GeneratorColor
+        else
+            data.TextLabel.Text = object.Name
+            data.TextLabel.TextColor3 = defaultColor
+            data.BaseColor = defaultColor
+        end
     end
-    
-    -- Auto cleanup
-    table.insert(espConnections[obj], obj.AncestryChanged:Connect(function()
-        task.wait(0.5)
-        if not obj.Parent then RemoveESP(obj) end
+
+    local hl = Instance.new("Highlight")
+    hl.Name = "ESPGlow_" .. tag
+    hl.FillColor = data.BaseColor
+    hl.FillTransparency = 0.7
+    hl.OutlineColor = data.BaseColor
+    hl.OutlineTransparency = 0.2
+    hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+    hl.Adornee = object
+    hl.Parent = object
+    data.Highlight = hl
+
+    table.insert(EngineState.Connections[object], object.AncestryChanged:Connect(function(_, pNode)
+        if not pNode then RemoveESP(object) end
     end))
 end
 
 -- ============================================================================
--- SCAN ALL - SIMPLIFIED AND DIRECT
+-- SCANALL - FIXED VERSION (NO GOTO)
 -- ============================================================================
 
 local function ScanAll()
-    -- Check if any ESP is enabled
     if not win or not win.Flags then return end
-    local anyEnabled = win.Flags.espKiller or win.Flags.espSurv or win.Flags.espGens or 
-                       win.Flags.espItems or win.Flags.espBuildings or 
-                       win.Flags.espHatch or win.Flags.espGates
-    if not anyEnabled then return end
     
-    -- Clean dead objects
-    for obj, _ in pairs(espObjects) do
+    if not (win.Flags.espSurv or win.Flags.espKiller or win.Flags.espGens or win.Flags.espHatch or win.Flags.espGates or win.Flags.espItems or win.Flags.espBuildings) then
+        return
+    end
+
+    for obj, _ in pairs(EngineState.Pool) do
         if not obj or not obj.Parent then RemoveESP(obj) end
     end
-    
-    -- 1. KILLERS
-    if win.Flags.espKiller then
-        local killers = svc.WS:FindFirstChild("Players")
-        if killers then
-            killers = killers:FindFirstChild("Killers")
-            if killers then
-                for _, model in ipairs(killers:GetChildren()) do
+
+    -- KILLERS & SURVIVORS
+    local playersFolder = svc.WS:FindFirstChild("Players")
+    if playersFolder then
+        if win.Flags.espKiller then
+            local killerFolder = playersFolder:FindFirstChild("Killers")
+            if killerFolder then
+                for _, model in ipairs(killerFolder:GetChildren()) do
                     if model:IsA("Model") and model ~= lp.Character then
-                        if not espObjects[model] then
+                        if not EngineState.Pool[model] then
                             AddESP(model, "Killer", ESP_CONFIG.KillerColor, true)
                         end
                     end
                 end
             end
         end
-    end
-    
-    -- 2. SURVIVORS
-    if win.Flags.espSurv then
-        local survivors = svc.WS:FindFirstChild("Players")
-        if survivors then
-            survivors = survivors:FindFirstChild("Survivors")
-            if survivors then
-                for _, model in ipairs(survivors:GetChildren()) do
+        
+        if win.Flags.espSurv then
+            local survivorFolder = playersFolder:FindFirstChild("Survivors")
+            if survivorFolder then
+                for _, model in ipairs(survivorFolder:GetChildren()) do
                     if model:IsA("Model") and model ~= lp.Character then
-                        if not espObjects[model] then
+                        if not EngineState.Pool[model] then
                             if model.Name:lower() == "model" or model.Name == "" then
                                 model.Name = "Survivor"
                             end
@@ -1380,92 +1378,62 @@ local function ScanAll()
             end
         end
     end
+
+    -- MAP OBJECTS (Generators, Hatch, Gates)
+    local map = svc.WS:FindFirstChild("Map")
+    local ingame = map and map:FindFirstChild("Ingame")
+    local currentMap = ingame and ingame:FindFirstChild("Map")
     
-    -- 3. GENERATORS
-    if win.Flags.espGens then
-        local map = svc.WS:FindFirstChild("Map")
-        if map then
-            local ingame = map:FindFirstChild("Ingame")
-            if ingame then
-                local currentMap = ingame:FindFirstChild("Map")
-                if currentMap then
-                    local objects = currentMap:FindFirstChild("Objects")
-                    if objects then
-                        for _, obj in ipairs(objects:GetChildren()) do
-                            if obj:IsA("Model") and string.find(obj.Name:lower(), "generator") then
-                                if not espObjects[obj] then
-                                    AddESP(obj, "Generator", ESP_CONFIG.GeneratorColor, false)
-                                end
-                            end
+    if currentMap then
+        if win.Flags.espGens then
+            local objects = currentMap:FindFirstChild("Objects")
+            if objects then
+                for _, obj in ipairs(objects:GetChildren()) do
+                    if obj:IsA("Model") and string.find(obj.Name:lower(), "generator") then
+                        if not EngineState.Pool[obj] then
+                            AddESP(obj, "Generator", ESP_CONFIG.GeneratorColor, false)
                         end
                     end
                 end
             end
         end
-    end
-    
-    -- 4. HATCH
-    if win.Flags.espHatch then
-        local map = svc.WS:FindFirstChild("Map")
-        if map then
-            local ingame = map:FindFirstChild("Ingame")
-            if ingame then
-                local currentMap = ingame:FindFirstChild("Map")
-                if currentMap then
-                    local hatch = currentMap:FindFirstChild("Hatch")
-                    if hatch and hatch:IsA("Model") and not espObjects[hatch] then
-                        AddESP(hatch, "Hatch", ESP_CONFIG.HatchColor, false)
+        
+        if win.Flags.espHatch then
+            local hatch = currentMap:FindFirstChild("Hatch")
+            if hatch and hatch:IsA("Model") and not EngineState.Pool[hatch] then
+                AddESP(hatch, "Hatch", ESP_CONFIG.HatchColor, false)
+            end
+        end
+        
+        if win.Flags.espGates then
+            local gates = currentMap:FindFirstChild("Gates")
+            if gates then
+                for _, gate in ipairs(gates:GetChildren()) do
+                    if gate:IsA("Model") and not EngineState.Pool[gate] then
+                        AddESP(gate, "Gate", ESP_CONFIG.GateColor, false)
                     end
                 end
             end
         end
     end
-    
-    -- 5. GATES
-    if win.Flags.espGates then
-        local map = svc.WS:FindFirstChild("Map")
-        if map then
-            local ingame = map:FindFirstChild("Ingame")
-            if ingame then
-                local currentMap = ingame:FindFirstChild("Map")
-                if currentMap then
-                    local gates = currentMap:FindFirstChild("Gates")
-                    if gates then
-                        for _, gate in ipairs(gates:GetChildren()) do
-                            if gate:IsA("Model") and not espObjects[gate] then
-                                AddESP(gate, "Gate", ESP_CONFIG.GateColor, false)
-                            end
-                        end
-                    end
+
+    -- BUILDINGS
+    if ingame and win.Flags.espBuildings then
+        local buildingNames = {"BuildermanSentry", "SubspaceTripmine", "BuildermanDispenser"}
+        for _, obj in ipairs(ingame:GetChildren()) do
+            for _, name in ipairs(buildingNames) do
+                if obj.Name == name and not EngineState.Pool[obj] then
+                    AddESP(obj, "Building", ESP_CONFIG.BuildingColor, false)
+                    break
                 end
             end
         end
     end
-    
-    -- 6. BUILDINGS
-    if win.Flags.espBuildings then
-        local ingame = svc.WS:FindFirstChild("Map")
-        if ingame then
-            ingame = ingame:FindFirstChild("Ingame")
-            if ingame then
-                local buildingNames = {"BuildermanSentry", "SubspaceTripmine", "BuildermanDispenser"}
-                for _, obj in ipairs(ingame:GetChildren()) do
-                    for _, name in ipairs(buildingNames) do
-                        if obj.Name == name and not espObjects[obj] then
-                            AddESP(obj, "Building", ESP_CONFIG.BuildingColor, false)
-                            break
-                        end
-                    end
-                end
-            end
-        end
-    end
-    
-    -- 7. ITEMS
+
+    -- ITEMS
     if win.Flags.espItems then
         for _, obj in ipairs(svc.WS:GetDescendants()) do
             if obj:IsA("BasePart") and (obj.Name == "BloxyCola" or obj.Name == "Medkit") then
-                -- Check if held
                 local held = false
                 for _, player in ipairs(svc.Players:GetPlayers()) do
                     if player.Character and obj:IsDescendantOf(player.Character) then
@@ -1478,7 +1446,7 @@ local function ScanAll()
                         break
                     end
                 end
-                if not held and not espObjects[obj] then
+                if not held and not EngineState.Pool[obj] then
                     local parent = obj.Parent
                     if parent and parent:IsA("Model") then
                         AddESP(parent, "Item", GetItemColor(obj.Name), false)
@@ -1492,7 +1460,7 @@ local function ScanAll()
 end
 
 -- ============================================================================
--- BACKGROUND SCAN
+-- BACKGROUND SCAN THREAD
 -- ============================================================================
 
 task.spawn(function()
@@ -1508,79 +1476,53 @@ end)
 
 svc.WS.DescendantAdded:Connect(function(obj)
     task.wait(0.5)
-    if not obj or not obj.Parent then return end
     
-    if obj:IsA("Model") then
-        -- Check if it's a killer
-        if ESP_CONFIG.Killers then
-            local killers = svc.WS:FindFirstChild("Players")
-            if killers then
-                killers = killers:FindFirstChild("Killers")
-                if killers and obj:IsDescendantOf(killers) and obj ~= lp.Character then
-                    if not espObjects[obj] then
-                        AddESP(obj, "Killer", ESP_CONFIG.KillerColor, true)
-                    end
-                end
-            end
+    if not obj:IsA("Model") then return end
+    
+    if ESP_CONFIG.Killers then
+        local f = getTeamFolder("Killers")
+        if f and obj:IsDescendantOf(f) and obj ~= lp.Character then
+            AddESP(obj, "Killer", ESP_CONFIG.KillerColor, true)
         end
-        
-        -- Check if it's a survivor
-        if ESP_CONFIG.Survivors then
-            local survivors = svc.WS:FindFirstChild("Players")
-            if survivors then
-                survivors = survivors:FindFirstChild("Survivors")
-                if survivors and obj:IsDescendantOf(survivors) and obj ~= lp.Character then
-                    if not espObjects[obj] then
-                        AddESP(obj, "Survivor", ESP_CONFIG.SurvivorColor, true)
-                    end
-                end
-            end
+    end
+    
+    if ESP_CONFIG.Survivors then
+        local f = getTeamFolder("Survivors")
+        if f and obj:IsDescendantOf(f) and obj ~= lp.Character then
+            AddESP(obj, "Survivor", ESP_CONFIG.SurvivorColor, true)
         end
-        
-        -- Check if it's a generator
-        if ESP_CONFIG.Generators and obj.Name == "Generator" then
-            if not espObjects[obj] then
-                AddESP(obj, "Generator", ESP_CONFIG.GeneratorColor, false)
-            end
-        end
-        
-        -- Check if it's hatch
-        if ESP_CONFIG.Hatch and obj.Name == "Hatch" then
-            if not espObjects[obj] then
-                AddESP(obj, "Hatch", ESP_CONFIG.HatchColor, false)
-            end
-        end
-        
-        -- Check if it's a gate
-        if ESP_CONFIG.Gates and obj.Name == "Gate" then
-            if not espObjects[obj] then
-                AddESP(obj, "Gate", ESP_CONFIG.GateColor, false)
-            end
-        end
-        
-        -- Check if it's a building
-        if ESP_CONFIG.Buildings then
-            local buildingNames = {"BuildermanSentry", "SubspaceTripmine", "BuildermanDispenser"}
-            for _, name in ipairs(buildingNames) do
-                if obj.Name == name and not espObjects[obj] then
-                    AddESP(obj, "Building", ESP_CONFIG.BuildingColor, false)
-                    break
-                end
+    end
+    
+    if ESP_CONFIG.Generators and obj.Name == "Generator" then
+        AddESP(obj, "Generator", ESP_CONFIG.GeneratorColor, false)
+    end
+    
+    if ESP_CONFIG.Buildings then
+        local buildingNames = {"BuildermanSentry", "SubspaceTripmine", "BuildermanDispenser"}
+        for _, name in ipairs(buildingNames) do
+            if obj.Name == name then
+                AddESP(obj, "Building", ESP_CONFIG.BuildingColor, false)
+                break
             end
         end
     end
+    
+    if ESP_CONFIG.Hatch and obj.Name == "Hatch" then
+        AddESP(obj, "Hatch", ESP_CONFIG.HatchColor, false)
+    end
+    
+    if ESP_CONFIG.Gates and obj.Name == "Gate" then
+        AddESP(obj, "Gate", ESP_CONFIG.GateColor, false)
+    end
 end)
 
--- Watch for items
+-- Items watch
 svc.WS.DescendantAdded:Connect(function(obj)
-    if not ESP_CONFIG.Items then return end
     if not obj:IsA("BasePart") then return end
+    if not ESP_CONFIG.Items then return end
     if obj.Name ~= "BloxyCola" and obj.Name ~= "Medkit" then return end
     
     task.wait(0.5)
-    if not obj or not obj.Parent then return end
-    
-    -- Check if held
     local held = false
     for _, player in ipairs(svc.Players:GetPlayers()) do
         if player.Character and obj:IsDescendantOf(player.Character) then
@@ -1593,8 +1535,7 @@ svc.WS.DescendantAdded:Connect(function(obj)
             break
         end
     end
-    
-    if not held and not espObjects[obj] then
+    if not held then
         local parent = obj.Parent
         if parent and parent:IsA("Model") then
             AddESP(parent, "Item", GetItemColor(obj.Name), false)
@@ -1608,145 +1549,29 @@ end)
 -- UI TOGGLES
 -- ============================================================================
 
-secESP:Toggle({ 
-    Title = "👹 Killers (Red)", 
-    Type = "Checkbox", 
-    Flag = "espKiller", 
-    Default = false,
-    Callback = function(on) 
-        ESP_CONFIG.Killers = on
-        if on then pcall(ScanAll) else 
-            for obj, _ in pairs(espObjects) do
-                if espObjects[obj] and espObjects[obj].Tag == "Killer" then
-                    RemoveESP(obj)
-                end
-            end
-        end
-    end 
-})
+secESP:Toggle({ Title="👹 Killers (Dark Red)", Type="Checkbox", Flag="espKiller", Default=ESP_CONFIG.Killers,
+    Callback=function(on) ESP_CONFIG.Killers=on; if on then pcall(ScanAll) end end })
 
-secESP:Toggle({ 
-    Title = "👥 Survivors (Gold)", 
-    Type = "Checkbox", 
-    Flag = "espSurv", 
-    Default = false,
-    Callback = function(on) 
-        ESP_CONFIG.Survivors = on
-        if on then pcall(ScanAll) else 
-            for obj, _ in pairs(espObjects) do
-                if espObjects[obj] and espObjects[obj].Tag == "Survivor" then
-                    RemoveESP(obj)
-                end
-            end
-        end
-    end 
-})
+secESP:Toggle({ Title="👥 Survivors (Gold)", Type="Checkbox", Flag="espSurv", Default=ESP_CONFIG.Survivors,
+    Callback=function(on) ESP_CONFIG.Survivors=on; if on then pcall(ScanAll) end end })
 
-secESP:Toggle({ 
-    Title = "⚙️ Generators (0/4)", 
-    Type = "Checkbox", 
-    Flag = "espGens", 
-    Default = false,
-    Callback = function(on) 
-        ESP_CONFIG.Generators = on
-        if on then pcall(ScanAll) else 
-            for obj, _ in pairs(espObjects) do
-                if espObjects[obj] and espObjects[obj].Tag == "Generator" then
-                    RemoveESP(obj)
-                end
-            end
-        end
-    end 
-})
+secESP:Toggle({ Title="⚙️ Generators (0/4)", Type="Checkbox", Flag="espGens", Default=ESP_CONFIG.Generators,
+    Callback=function(on) ESP_CONFIG.Generators=on; if on then pcall(ScanAll) end end })
 
-secESP:Toggle({ 
-    Title = "📦 Items (Cyan/Orange)", 
-    Type = "Checkbox", 
-    Flag = "espItems", 
-    Default = false,
-    Callback = function(on) 
-        ESP_CONFIG.Items = on
-        if on then pcall(ScanAll) else 
-            for obj, _ in pairs(espObjects) do
-                if espObjects[obj] and espObjects[obj].Tag == "Item" then
-                    RemoveESP(obj)
-                end
-            end
-        end
-    end 
-})
+secESP:Toggle({ Title="📦 Items (Cyan/Orange)", Type="Checkbox", Flag="espItems", Default=ESP_CONFIG.Items,
+    Callback=function(on) ESP_CONFIG.Items=on; if on then pcall(ScanAll) end end })
 
-secESP:Toggle({ 
-    Title = "🏗️ Buildings (Purple)", 
-    Type = "Checkbox", 
-    Flag = "espBuildings", 
-    Default = false,
-    Callback = function(on) 
-        ESP_CONFIG.Buildings = on
-        if on then pcall(ScanAll) else 
-            for obj, _ in pairs(espObjects) do
-                if espObjects[obj] and espObjects[obj].Tag == "Building" then
-                    RemoveESP(obj)
-                end
-            end
-        end
-    end 
-})
+secESP:Toggle({ Title="🏗️ Buildings (Purple)", Type="Checkbox", Flag="espBuildings", Default=ESP_CONFIG.Buildings,
+    Callback=function(on) ESP_CONFIG.Buildings=on; if on then pcall(ScanAll) end end })
 
-secESP:Toggle({ 
-    Title = "🕳️ Hatch (Teal)", 
-    Type = "Checkbox", 
-    Flag = "espHatch", 
-    Default = false,
-    Callback = function(on) 
-        ESP_CONFIG.Hatch = on
-        if on then pcall(ScanAll) else 
-            for obj, _ in pairs(espObjects) do
-                if espObjects[obj] and espObjects[obj].Tag == "Hatch" then
-                    RemoveESP(obj)
-                end
-            end
-        end
-    end 
-})
+secESP:Toggle({ Title="🕳️ Hatch (Teal)", Type="Checkbox", Flag="espHatch", Default=ESP_CONFIG.Hatch,
+    Callback=function(on) ESP_CONFIG.Hatch=on; if on then pcall(ScanAll) end end })
 
-secESP:Toggle({ 
-    Title = "🚪 Gates (Pink)", 
-    Type = "Checkbox", 
-    Flag = "espGates", 
-    Default = false,
-    Callback = function(on) 
-        ESP_CONFIG.Gates = on
-        if on then pcall(ScanAll) else 
-            for obj, _ in pairs(espObjects) do
-                if espObjects[obj] and espObjects[obj].Tag == "Gate" then
-                    RemoveESP(obj)
-                end
-            end
-        end
-    end 
-})
+secESP:Toggle({ Title="🚪 Gates (Pink)", Type="Checkbox", Flag="espGates", Default=ESP_CONFIG.Gates,
+    Callback=function(on) ESP_CONFIG.Gates=on; if on then pcall(ScanAll) end end })
 
-secESP:Button({ 
-    Title = "🔄 Refresh ESP", 
-    Callback = function() 
-        pcall(ScanAll) 
-        ui:Notify({ Title = "ESP Refreshed!", Icon = "check", Duration = 2 })
-    end 
-})
+secESP:Button({ Title="🔄 Refresh ESP", Callback=function() pcall(ScanAll) end })
 
-secESP:Button({ 
-    Title = "🗑️ Clear All ESP", 
-    Callback = function() 
-        for obj, _ in pairs(espObjects) do
-            RemoveESP(obj)
-        end
-        espObjects = {}
-        ui:Notify({ Title = "All ESP Cleared!", Icon = "x", Duration = 2 })
-    end 
-})
-
-print("[ESP] Loaded successfully!")
 ------------------------------------------------------------------------
 -- MINION ESP (KEPT FROM ORIGINAL)
 ------------------------------------------------------------------------
@@ -2032,6 +1857,7 @@ secLMS:Button({ Title="▶  Play",        Callback=function() musicPlay(music.se
 secLMS:Button({ Title="■  Stop",        Callback=function() musicReset() end })
 secLMS:Button({ Title="↓  Preload LMS", Callback=function() for name in pairs(musicTracks) do task.spawn(function()musicFetch(name)end); task.wait(0.1) end end })
 lp.CharacterAdded:Connect(function() task.wait(3); if music.on then if music.thread then task.cancel(music.thread) end; music.thread=task.spawn(musicMonitor) end end)
+
 local tabElliot  = win:Tab({ Title = "Elliot", Icon = "pizza", IconColor = Color3.fromHex("#FFD700"), ShowTabTitle = false })
 local tabChance  = win:Tab({ Title = "Chance", Icon = "crosshair", IconColor = Color3.fromHex("#FF69B4"), ShowTabTitle = false })
 
